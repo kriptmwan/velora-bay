@@ -1,3 +1,9 @@
+[![make.fun · gta6-01](https://make.fun/badge/gta6-01.svg)](https://make.fun/bounty/gta6-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
+[![rank](https://make.fun/badge/gta6-01/kriptmwan/velora-bay/rank.svg)](https://make.fun/bounty/gta6-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
+[![reward](https://make.fun/badge/gta6-01/kriptmwan/velora-bay/reward.svg)](https://make.fun/bounty/gta6-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
+
+Entered on make.fun: https://make.fun/?ref=emz2619t&utm_source=github&utm_medium=readme&utm_campaign=gta6-01
+
 # Velora Bay — Open-World Crime Game
 
 **Velora Bay** is a 2D top-down open-world crime game built from scratch in
