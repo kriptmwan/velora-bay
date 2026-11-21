@@ -1,160 +1,117 @@
-// Velora Bay — traffic AI: cars follow the road grid, stop for cars ahead, honk.
-import { WORLD, S } from './state.js';
-import { makeCar, randomTrafficCar, carsOverlap } from './vehicles.js';
-import { collideBuildings, isOnRoad } from './city.js';
-import { rand, randi, clamp, angleDiff } from './utils.js';
+// traffic.js — ambient AI cars that follow the road grid. Each car picks a
+// road line and a direction, drives it, turns at intersections, slows for
+// the car ahead, and respawns near the player when it drifts too far away.
 
-const DIRS = [[1, 0], [0, 1], [-1, 0], [0, -1]]; // E S W N
+import { VEHICLE_DEFS } from "./state.js";
+import { ROAD_GAP, randomRoadPoint } from "./city.js";
+import { clamp, rand, randInt, pick } from "./utils.js";
+import { updateVehiclePhysics, steerToward } from "./vehicles.js";
 
-export function spawnTraffic(count) {
-  const b = WORLD.block, n = WORLD.roads;
-  for (let i = 0; i < count; i++) {
-    const ix = randi(0, n - 1), iy = randi(0, n - 1);
-    const dir = randi(0, 3);
-    const lane = 15;
-    const ox = dir === 1 ? lane : dir === 3 ? -lane : 0;
-    const oy = dir === 0 ? lane : dir === 2 ? -lane : 0;
-    const c = randomTrafficCar(ix * b + ox, iy * b + oy, Math.atan2(DIRS[dir][1], DIRS[dir][0]));
-    c.ix = ix; c.iy = iy; c.dir = dir; c.speed = rand(90, 170);
-    S.cars.push(c);
+const TRAFFIC_TYPES = ["sedan", "coupe", "taxi", "truck", "van", "suv", "pickup"];
+
+export class TrafficSystem {
+  constructor(world) {
+    this.world = world;
   }
-}
 
-export function spawnParked(count) {
-  const b = WORLD.block, n = WORLD.roads;
-  const models = ['sedan', 'coupe', 'sports', 'muscle', 'suv', 'pickup', 'bike', 'van'];
-  for (let i = 0; i < count; i++) {
-    const ix = randi(0, n - 1), iy = randi(0, n - 1);
-    const horizontal = Math.random() < 0.5;
-    const along = rand(70, b - 70);
-    const x = horizontal ? ix * b + along : ix * b + (Math.random() < 0.5 ? 38 : -38);
-    const y = horizontal ? iy * b + (Math.random() < 0.5 ? 38 : -38) : iy * b + along;
-    const c = makeCar(models[Math.floor(Math.random() * models.length)], x, y, horizontal ? (Math.random() < 0.5 ? 0 : Math.PI) : (Math.random() < 0.5 ? Math.PI / 2 : -Math.PI / 2), { parked: true });
-    S.cars.push(c);
+  spawnInitial(count) {
+    for (let i = 0; i < count; i++) this.spawnOne(true);
   }
-}
 
-function pickNextDir(c) {
-  const opts = [0, 1, 2, 3].filter(d => d !== (c.dir + 2) % 4);
-  // prefer straight
-  if (Math.random() < 0.55) return c.dir;
-  return opts[Math.floor(Math.random() * opts.length)];
-}
+  spawnOne(anywhere) {
+    const w = this.world;
+    const p = w.player;
+    let pt;
+    if (anywhere) {
+      pt = randomRoadPoint(w.rng);
+    } else {
+      pt = randomRoadPoint(w.rng);
+      // Bias the respawn to somewhere near the player.
+      pt.x = clamp(pt.x, p.x - 900, p.x + 900);
+      pt.y = clamp(pt.y, p.y - 900, p.y + 900);
+    }
+    const type = pick(w.rng, TRAFFIC_TYPES);
+    const def = VEHICLE_DEFS[type];
+    const vertical = w.rng() < 0.5;
+    const car = {
+      id: 9000 + w.traffic.length + Math.floor(w.rng() * 100000),
+      type, name: def.name,
+      x: pt.x, y: pt.y,
+      angle: vertical ? (w.rng() < 0.5 ? Math.PI / 2 : -Math.PI / 2) : (w.rng() < 0.5 ? 0 : Math.PI),
+      speed: 0, color: def.color,
+      topSpeed: 90 + w.rng() * 50, accel: 120, grip: 2.4,
+      health: 100, driver: "traffic",
+      cruise: 80 + w.rng() * 60,
+      target: null, // {x, y} intersection to drive toward
+      stuck: 0,
+    };
+    car.target = this._nextTarget(car);
+    w.traffic.push(car);
+    return car;
+  }
 
-export function updateTraffic(dt) {
-  const b = WORLD.block, n = WORLD.roads;
-  for (const c of S.cars) {
-    if (!c.traffic || c.driver !== 'traffic') continue;
-    if (c.wait > 0) { c.wait -= dt; c.speed = Math.max(0, c.speed - 200 * dt); continue; }
-    const [dx, dy] = DIRS[c.dir];
-    const tx = (c.ix + dx) * b, ty = (c.iy + dy) * b;
-    const lane = 15;
-    const ox = c.dir === 1 ? lane : c.dir === 3 ? -lane : 0;
-    const oy = c.dir === 0 ? lane : c.dir === 2 ? -lane : 0;
-    const gx = tx + ox, gy = ty + oy;
-    const ddx = gx - c.x, ddy = gy - c.y;
-    const d = Math.sqrt(ddx * ddx + ddy * ddy);
-    const wantAngle = Math.atan2(ddy, ddx);
-    c.angle += clamp(angleDiff(c.angle, wantAngle), -2.4 * dt, 2.4 * dt);
-    // car ahead? slow down
-    let blocked = false;
-    for (const o of S.cars) {
-      if (o === c || o.parked) continue;
-      const fx = o.x - c.x, fy = o.y - c.y;
-      const ahead = fx * Math.cos(c.angle) + fy * Math.sin(c.angle);
-      const side = Math.abs(-fx * Math.sin(c.angle) + fy * Math.cos(c.angle));
-      if (ahead > 0 && ahead < 70 && side < 26) { blocked = true; break; }
+  _nextTarget(car) {
+    const w = this.world;
+    const vertical = Math.abs(Math.cos(car.angle)) < 0.5;
+    const dir = vertical ? Math.sign(Math.sin(car.angle)) || 1 : Math.sign(Math.cos(car.angle)) || 1;
+    if (vertical) {
+      const nextLine = clamp(Math.round(car.y / ROAD_GAP) * ROAD_GAP + dir * ROAD_GAP, 100, 3100);
+      return { x: car.x, y: nextLine, turnAtEnd: true };
     }
-    const p = S.player;
-    if (p && !p.onFoot && p.car) {
-      const fx = p.car.x - c.x, fy = p.car.y - c.y;
-      const ahead = fx * Math.cos(c.angle) + fy * Math.sin(c.angle);
-      const side = Math.abs(-fx * Math.sin(c.angle) + fy * Math.cos(c.angle));
-      if (ahead > 0 && ahead < 80 && side < 30) blocked = true;
-    }
-    const target = blocked ? 0 : rand(0, 0) + 150;
-    c.speed += clamp((blocked ? 0 : 150) - c.speed, -260 * dt, 130 * dt);
-    c.x += Math.cos(c.angle) * c.speed * dt;
-    c.y += Math.sin(c.angle) * c.speed * dt;
-    if (d < 26) {
-      c.ix += dx; c.iy += dy;
-      if (c.ix < 0 || c.iy < 0 || c.ix >= n || c.iy >= n) {
-        // turn around at the edge
-        c.dir = (c.dir + 2) % 4;
-        c.ix = clamp(c.ix, 0, n - 1); c.iy = clamp(c.iy, 0, n - 1);
-      } else {
-        c.dir = pickNextDir(c);
+    const nextLine = clamp(Math.round(car.x / ROAD_GAP) * ROAD_GAP + dir * ROAD_GAP, 100, 3100);
+    return { x: nextLine, y: car.y, turnAtEnd: true };
+  }
+
+  update(dt) {
+    const w = this.world;
+    const p = w.player;
+    if (w.traffic.length < 14) this.spawnOne(false);
+    for (const car of w.traffic) {
+      const dx = car.target.x - car.x;
+      const dy = car.target.y - car.y;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      if (d < 30) {
+        // At the intersection: keep going or turn onto the cross road.
+        if (w.rng() < 0.45) {
+          car.angle += (w.rng() < 0.5 ? 1 : -1) * Math.PI / 2;
+        }
+        car.target = this._nextTarget(car);
       }
+      // Slow down for the car ahead.
+      let ahead = false;
+      for (const other of w.traffic) {
+        if (other === car) continue;
+        const ox = other.x - car.x;
+        const oy = other.y - car.y;
+        const od = Math.sqrt(ox * ox + oy * oy);
+        if (od < 70 && ox * Math.cos(car.angle) + oy * Math.sin(car.angle) > 0) { ahead = true; break; }
+      }
+      const playerCar = p.vehicle;
+      if (playerCar) {
+        const ox = playerCar.x - car.x;
+        const oy = playerCar.y - car.y;
+        const od = Math.sqrt(ox * ox + oy * oy);
+        if (od < 60 && ox * Math.cos(car.angle) + oy * Math.sin(car.angle) > 0) ahead = true;
+      }
+      steerToward(car, car.target.x, car.target.y, dt);
+      const control = { throttle: ahead ? 0 : 0.7, steer: 0, brake: ahead };
+      const before = car.speed;
+      updateVehiclePhysics(w, car, dt, control);
+      car.speed = clamp(car.speed, 0, car.cruise);
+      if (Math.abs(car.speed) < 1 && !ahead) car.stuck += dt;
+      else car.stuck = 0;
+      if (car.stuck > 3) { car.target = this._nextTarget(car); car.stuck = 0; }
+      void before;
     }
-  }
-  // remove traffic cars that drifted off-grid or got stuck, respawn far away
-  for (let i = S.cars.length - 1; i >= 0; i--) {
-    const c = S.cars[i];
-    if (c.traffic && (c.x < -200 || c.y < -200 || c.x > WORLD.size + 200 || c.y > WORLD.size + 200)) {
-      S.cars.splice(i, 1);
-    }
-  }
-  const trafficCount = S.cars.filter(c => c.traffic).length;
-  if (trafficCount < 26 && S.mode === 'play') {
-    const p = S.player;
-    const px = p ? p.x : WORLD.size / 2, py = p ? p.y : WORLD.size / 2;
-    const ang = rand(0, Math.PI * 2);
-    const ix = Math.round((px + Math.cos(ang) * 900) / WORLD.block);
-    const iy = Math.round((py + Math.sin(ang) * 900) / WORLD.block);
-    if (ix >= 0 && ix < WORLD.roads && iy >= 0 && iy < WORLD.roads) {
-      const dir = randi(0, 3);
-      const c = randomTrafficCar(ix * WORLD.block, iy * WORLD.block, Math.atan2(DIRS[dir][1], DIRS[dir][0]));
-      c.ix = ix; c.iy = iy; c.dir = dir; c.speed = 140;
-      S.cars.push(c);
-    }
-  }
-}
-
-export function drawCarShape(ctx, c, night) {
-  ctx.save();
-  ctx.translate(c.x, c.y);
-  ctx.rotate(c.angle);
-  const L = c.def.len, W = c.def.wid;
-  ctx.shadowColor = 'rgba(0,0,0,0.45)'; ctx.shadowBlur = 8; ctx.shadowOffsetY = 4;
-  ctx.fillStyle = '#111';
-  ctx.beginPath(); ctx.roundRect(-L / 2 - 2, -W / 2 - 2, L + 4, W + 4, 8); ctx.fill();
-  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
-  ctx.fillStyle = c.color;
-  ctx.beginPath(); ctx.roundRect(-L / 2, -W / 2, L, W, 7); ctx.fill();
-  // roof / cabin
-  ctx.fillStyle = 'rgba(20,30,45,0.85)';
-  ctx.beginPath(); ctx.roundRect(-L * 0.18, -W * 0.36, L * 0.36, W * 0.72, 5); ctx.fill();
-  ctx.fillStyle = 'rgba(160,210,255,0.55)';
-  ctx.beginPath(); ctx.roundRect(L * 0.10, -W * 0.30, L * 0.10, W * 0.60, 3); ctx.fill();
-  // headlights / tail lights
-  ctx.fillStyle = night ? '#ffe9a8' : '#fff8d0';
-  ctx.fillRect(L / 2 - 2, -W / 2 + 2, 3, 6); ctx.fillRect(L / 2 - 2, W / 2 - 8, 3, 6);
-  ctx.fillStyle = '#ff2d2d';
-  ctx.fillRect(-L / 2 - 1, -W / 2 + 2, 3, 6); ctx.fillRect(-L / 2 - 1, W / 2 - 8, 3, 6);
-  if (c.brakeLight) { ctx.fillStyle = '#ff0000'; ctx.fillRect(-L / 2 - 3, -W / 2, 4, W); }
-  if (c.model === 'taxi') {
-    ctx.fillStyle = '#111'; ctx.font = 'bold 9px sans-serif'; ctx.textAlign = 'center';
-    ctx.fillText('TAXI', 0, 3);
-    ctx.fillStyle = '#ffd23f'; ctx.fillRect(-L * 0.18, -W / 2 - 4, L * 0.36, 4);
-  }
-  if (c.model === 'police') {
-    ctx.fillStyle = '#fff'; ctx.fillRect(-L * 0.28, -W / 2, L * 0.56, 5); ctx.fillRect(-L * 0.28, W / 2 - 5, L * 0.56, 5);
-    ctx.fillStyle = '#111'; ctx.font = 'bold 8px sans-serif'; ctx.textAlign = 'center';
-    ctx.fillText('VBPD', 0, 3);
-    const phase = Math.floor(S.time * 4) % 2 === 0;
-    ctx.fillStyle = phase ? '#ff2d2d' : '#2d7dff';
-    ctx.beginPath(); ctx.arc(-4, -W / 2 - 1, 4, 0, 7); ctx.fill();
-    ctx.fillStyle = phase ? '#2d7dff' : '#ff2d2d';
-    ctx.beginPath(); ctx.arc(4, -W / 2 - 1, 4, 0, 7); ctx.fill();
-  }
-  if (c.model === 'bike') {
-    ctx.fillStyle = '#111'; ctx.beginPath(); ctx.arc(L * 0.32, 0, 5, 0, 7); ctx.arc(-L * 0.32, 0, 5, 0, 7); ctx.fill();
-  }
-  ctx.restore();
-  if (c.health < 60 && c.health > 0) {
-    // smoke
-    if (Math.random() < 0.3) {
-      S.particles.push({ x: c.x - Math.cos(c.angle) * c.def.len / 2, y: c.y - Math.sin(c.angle) * c.def.len / 2, vx: rand(-15, 15), vy: rand(-30, -10), life: 0.8, max: 0.8, size: rand(6, 12), color: 'rgba(80,80,80,0.5)', type: 'smoke' });
+    // Recycle cars that drifted far from the player.
+    for (let i = w.traffic.length - 1; i >= 0; i--) {
+      const car = w.traffic[i];
+      const d = Math.hypot(car.x - p.x, car.y - p.y);
+      if (d > 1600) {
+        const fresh = this.spawnOne(false);
+        void fresh;
+        w.traffic.splice(i, 1);
+      }
     }
   }
 }

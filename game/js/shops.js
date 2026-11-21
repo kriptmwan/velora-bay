@@ -1,97 +1,114 @@
-// Velora Bay — shops: guns, armor, food, payphone bribes, garage paint/repair.
-import { S, addCash, showToast, say } from './state.js';
-import { WEAPONS } from './combat.js';
-import { dist } from './utils.js';
-import { sfx } from './audio.js';
+// shops.js — the six shops of Velora Bay. Walk up to a shop marker and
+// press E: weapons and ammo at Ironworks, armor at SafeHouse, food that
+// heals at Mama Luz's, a payphone bribe that lowers your wanted level,
+// cars at Velora Motors, and outfits at Strip Threads.
 
-export function nearestShop() {
-  const p = S.player;
-  let best = null, bd = 110;
-  for (const sh of S.city.shops) {
-    const d = dist(p.x, p.y, sh.x, sh.y);
-    if (d < bd) { bd = d; best = sh; }
-  }
-  return best;
-}
+import { WEAPON_DEFS, VEHICLE_DEFS, addCash, showMessage } from "./state.js";
+import { dist, fmtCash } from "./utils.js";
 
-export function garageAction() {
-  const p = S.player;
-  const sh = nearestShop();
-  if (sh && sh.kind === 'paint' && p.car) {
-    if (S.cash >= 150) {
-      addCash(-150);
-      p.car.color = ['#e84d2e', '#2e9e8c', '#ffd23f', '#7a3dc9', '#4d7ac9'][Math.floor(Math.random() * 5)];
-      p.car.health = 100;
-      showToast('Respray + full repair! -$150. Looking sharp.', 3);
-      sfx('pickup');
-    } else showToast('Respray costs $150 — you are short.', 2);
-    return;
-  }
-  if (sh && sh.kind === 'gun') { buyMenu('gun'); return; }
-  if (sh && sh.kind === 'armor') { buyMenu('armor'); return; }
-  if (sh && sh.kind === 'food') {
-    if (S.cash >= 20) { addCash(-20); S.player.health = Math.min(100, S.player.health + 50); showToast('Burger Bay meal: +50 health. -$20', 2); sfx('pickup'); }
-    else showToast('A meal costs $20.', 2);
-    return;
-  }
-  if (sh && sh.kind === 'phone') { phoneAction(); return; }
-  if (sh && sh.kind === 'clothes') {
-    showToast('Velora Threads: new threads, same Rex. (cosmetic)', 2);
-    return;
-  }
-  // near the garage landmark: store current car
-  const g = S.city.landmarks.find(l => l.id === 'garage');
-  if (g && dist(p.x, p.y, g.x, g.y) < 160 && p.car) {
-    if (!S.ownedCars.includes(p.car.id)) {
-      S.ownedCars.push(p.car.id);
-      showToast('Car stored in Dante\'s Garage. It is yours now.', 3);
-      sfx('pickup');
-    } else showToast('This car is already yours.', 2);
-    return;
-  }
-  showToast('No shop here. Find Ironworks Guns, Vest & Co., Burger Bay, Spray & Shine, or a payphone (see map).', 3.5);
-}
+export const SHOP_MENU = {
+  weapons: [
+    { label: "P9 Pistol ammo (24)", price: 120, apply: (w) => { w.player.ammo.pistol += 24; } },
+    { label: "K9 SMG — buy gun", price: 2400, apply: (w) => { w.player.ammo.smg += 64; w.player.weapon = "smg"; } },
+    { label: "K9 SMG ammo (64)", price: 300, apply: (w) => { w.player.ammo.smg += 64; } },
+    { label: "Boomstick 12 — buy gun", price: 3200, apply: (w) => { w.player.ammo.shotgun += 18; w.player.weapon = "shotgun"; } },
+    { label: "AR-7 Rifle — buy gun", price: 5500, apply: (w) => { w.player.ammo.rifle += 60; w.player.weapon = "rifle"; } },
+    { label: "AR-7 ammo (60)", price: 450, apply: (w) => { w.player.ammo.rifle += 60; } },
+  ],
+  armor: [
+    { label: "Kevlar vest (+50 armor)", price: 600, apply: (w) => { w.player.armor = Math.min(100, w.player.armor + 50); } },
+    { label: "Full body armor (+100 armor)", price: 1100, apply: (w) => { w.player.armor = 100; } },
+  ],
+  food: [
+    { label: "Luz's special (+40 health)", price: 25, apply: (w) => { w.player.health = Math.min(100, w.player.health + 40); } },
+    { label: "Full meal (+100 health)", price: 50, apply: (w) => { w.player.health = 100; } },
+  ],
+  bribe: [
+    { label: "Bribe the desk sergeant (-2 stars)", price: 500, apply: (w) => { w.player.wanted = Math.max(0, w.player.wanted - 2); w.player.wantedHeat = 0; } },
+    { label: "Bribe the whole precinct (clear wanted)", price: 1500, apply: (w) => { w.player.wanted = 0; w.player.wantedHeat = 0; w.police.length = 0; w.heli = null; } },
+  ],
+  dealer: [
+    { label: "Vela Coupe", price: 5200, apply: (w) => { w.ownedCars.push("coupe"); } },
+    { label: "Brawler Muscle", price: 9500, apply: (w) => { w.ownedCars.push("muscle"); } },
+    { label: "Comet GT", price: 18000, apply: (w) => { w.ownedCars.push("comet"); } },
+    { label: "Wasp Bike", price: 6500, apply: (w) => { w.ownedCars.push("bike"); } },
+    { label: "Ridgeline SUV", price: 11000, apply: (w) => { w.ownedCars.push("suv"); } },
+  ],
+  clothes: [
+    { label: "Street outfit", price: 150, apply: (w) => { w.player.outfit = 1; } },
+    { label: "Neon suit", price: 400, apply: (w) => { w.player.outfit = 2; } },
+    { label: "Syndicate tuxedo", price: 900, apply: (w) => { w.player.outfit = 3; } },
+  ],
+};
 
-function buyMenu(kind) {
-  if (kind === 'gun') {
-    // buy the cheapest weapon you do not own yet
-    const order = ['smg', 'shotgun', 'rifle'];
-    for (const name of order) {
-      const w = WEAPONS[name];
-      if (!S.weapons[name].owned) {
-        if (S.cash >= w.price) {
-          addCash(-w.price);
-          S.weapons[name] = { ammo: w.mag, owned: true };
-          S.weapon = name;
-          showToast(`Bought ${w.name} for $${w.price}! Press 2/3/4 to use it.`, 3);
-          sfx('cash');
-        } else showToast(`${w.name} costs $${w.price} — you have $${Math.round(S.cash)}.`, 3);
-        return;
-      }
+export class ShopSystem {
+  constructor(world, game) {
+    this.world = world;
+    this.game = game;
+    this.openShop = null; // shop def currently browsed, or null
+  }
+
+  nearestShop(maxDist) {
+    const w = this.world;
+    const p = w.player;
+    let best = null;
+    let bestD = (maxDist || 90) * (maxDist || 90);
+    for (const s of w.shops) {
+      const d = (s.x - p.x) * (s.x - p.x) + (s.y - p.y) * (s.y - p.y);
+      if (d < bestD) { bestD = d; best = s; }
     }
-    // all owned: buy ammo
-    const cur = S.weapons[S.weapon];
-    if (S.cash >= 100) { addCash(-100); cur.ammo += 120; showToast('Ammo restocked +120. -$100', 2); sfx('cash'); }
-    else showToast('Ammo costs $100.', 2);
+    return best;
   }
-  if (kind === 'armor') {
-    if (S.player.armor >= 100) { showToast('Armor already full.', 2); return; }
-    if (S.cash >= 200) { addCash(-200); S.player.armor = 100; showToast('Full body armor! -$200', 2); sfx('pickup'); }
-    else showToast('Body armor costs $200.', 2);
+
+  // Buy menu item `index` from the open shop. Returns a message line.
+  buy(index) {
+    const w = this.world;
+    if (!this.openShop) return "No shop open.";
+    const items = SHOP_MENU[this.openShop.kind] || [];
+    const item = items[index];
+    if (!item) return "Nothing there.";
+    if (w.player.cash < item.price) return "Not enough cash — you need " + fmtCash(item.price) + ".";
+    w.player.cash -= item.price;
+    item.apply(w);
+    if (this.game && this.game.audio) this.game.audio.cash();
+    return "Bought: " + item.label + " for " + fmtCash(item.price) + ".";
+  }
+
+  open(shop) {
+    this.openShop = shop;
+    if (this.game && this.game.menus) this.game.menus.showShop(shop);
+  }
+
+  close() {
+    this.openShop = null;
+    if (this.game && this.game.menus) this.game.menus.hideShop();
+  }
+
+  update(input) {
+    const w = this.world;
+    if (this.openShop) {
+      if (input.wasPressed("Escape") || input.wasPressed("e")) this.close();
+      return;
+    }
+    const shop = this.nearestShop(90);
+    if (shop && w.player.onFoot && input.wasPressed("e")) {
+      this.open(shop);
+    }
+  }
+
+  shopHint() {
+    const shop = this.nearestShop(90);
+    if (!shop || !this.world.player.onFoot) return "";
+    return "Press E — " + shop.name;
   }
 }
 
-export function phoneAction() {
-  if (S.wanted === 0) { showToast('No heat on you. The payphone is quiet.', 2); return; }
-  const cost = S.wanted * 150;
-  if (S.cash >= cost) {
-    addCash(-cost);
-    S.wantedHeat = 0; S.wanted = 0;
-    S.cops.forEach(c => { c.givingUp = true; });
-    showToast(`Bribe paid: -$${cost}. The cops lost interest... this time.`, 3);
-    sfx('cash');
-    say('CRUZ', 'That bribe bought you an hour, Rex. Do not waste it.');
-  } else {
-    showToast(`A bribe costs $${cost} at ${S.wanted} stars — you have $${Math.round(S.cash)}.`, 3);
-  }
+export function weaponCatalog() {
+  return Object.entries(WEAPON_DEFS).map(([id, d]) => ({ id, ...d }));
+}
+
+export function vehicleCatalog() {
+  return Object.entries(VEHICLE_DEFS)
+    .filter(([id]) => id !== "police")
+    .map(([id, d]) => ({ id, ...d }));
 }

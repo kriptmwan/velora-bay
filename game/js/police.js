@@ -1,176 +1,178 @@
-// Velora Bay — wanted system: escalating police response, roadblocks, helicopter, busted.
-import { S, WORLD, addHeat, updateStars, showToast } from './state.js';
-import { makeCar } from './vehicles.js';
-import { clamp, dist, angleDiff, rand, randi } from './utils.js';
-import { sfx } from './audio.js';
-import { spawnParticles } from './effects.js';
-import { damagePlayer } from './player.js';
+// police.js — the wanted system and the VCPD response. Cruisers chase and
+// ram, roadblocks appear at 3 stars, the helicopter joins at 4 stars, and
+// the heat cools off when the player stays out of sight.
 
-export function updateWanted(dt) {
-  // decay when quiet and no cop close
-  const p = S.player;
-  let copNear = false;
-  for (const cop of S.cops) if (dist(cop.x, cop.y, p.x, p.y) < 420) copNear = true;
-  if (S.time - S.lastCrime > 9 && !copNear && S.wantedHeat > 0) {
-    S.wantedHeat = Math.max(0, S.wantedHeat - dt * 2.2);
-    updateStars();
-  }
-  const want = S.wanted;
-  // spawn cops up to wanted level
-  const targetCops = want === 0 ? 0 : want + 1;
-  if (S.cops.length < targetCops && S.mode === 'play') {
-    spawnCop();
-  }
-  if (S.cops.length > targetCops) {
-    // extra cops give up and drive away
-    const extra = S.cops[S.cops.length - 1];
-    extra.givingUp = true;
-  }
-  // helicopter at 4+ stars
-  if (want >= 4 && !S.heli) {
-    S.heli = { x: p.x + 300, y: p.y - 300, angle: 0, sirenT: 0 };
-    showToast('POLICE HELICOPTER INBOUND!', 3);
-    sfx('siren');
-  }
-  if (want < 4 && S.heli) S.heli = null;
-  if (S.heli) {
-    const h = S.heli;
-    h.angle += dt * 0.5;
-    const tx = p.x + Math.cos(h.angle) * 220, ty = p.y + Math.sin(h.angle) * 220;
-    h.x += (tx - h.x) * dt * 0.8; h.y += (ty - h.y) * dt * 0.8;
-    h.sirenT -= dt;
-    if (h.sirenT <= 0) { h.sirenT = 1.4; sfx('siren'); }
-    // spotlight pins the player: heat creeps up while lit
-    if (dist(h.x, h.y, p.x, p.y) < 260) S.wantedHeat = Math.min(100, S.wantedHeat + dt * 0.8);
-  }
-  // roadblocks at 3+ stars: parked cop cars ahead on the player's road
-  if (want >= 3 && Math.random() < dt * 0.15) spawnRoadblock();
-}
+import { VEHICLE_DEFS, setWanted, hurtPlayer, showMessage } from "./state.js";
+import { clamp, dist } from "./utils.js";
+import { spawnVehicle, updateVehiclePhysics, steerToward } from "./vehicles.js";
+import { randomRoadPoint } from "./city.js";
 
-function spawnCop() {
-  const p = S.player;
-  const ang = rand(0, Math.PI * 2);
-  const d = rand(650, 900);
-  const x = clamp(p.x + Math.cos(ang) * d, 60, WORLD.size - 60);
-  const y = clamp(p.y + Math.sin(ang) * d, 60, WORLD.size - 60);
-  const c = makeCar('police', x, y, Math.atan2(p.y - y, p.x - x), { cop: true, driver: 'cop' });
-  c.siren = true;
-  S.cars.push(c);
-  S.cops.push(c);
-}
-
-function spawnRoadblock() {
-  const p = S.player;
-  if (!p.car) return;
-  const ahead = 420;
-  const bx = p.car.x + Math.cos(p.car.angle) * ahead;
-  const by = p.car.y + Math.sin(p.car.angle) * ahead;
-  for (let i = -1; i <= 1; i++) {
-    const c = makeCar('police', bx + Math.cos(p.car.angle + Math.PI / 2) * i * 60, by + Math.sin(p.car.angle + Math.PI / 2) * i * 60, p.car.angle + Math.PI / 2, { cop: true, driver: 'cop', parked: true });
-    c.siren = true;
-    S.cars.push(c); S.cops.push(c);
+export class PoliceSystem {
+  constructor(world, game) {
+    this.world = world;
+    this.game = game;
+    this.spawnTimer = 0;
+    this.roadblockTimer = 0;
   }
-  showToast('ROADBLOCK AHEAD!', 2.5);
-}
 
-export function updateCops(dt) {
-  const p = S.player;
-  for (let i = S.cops.length - 1; i >= 0; i--) {
-    const c = S.cops[i];
-    if (c.dead) { S.cops.splice(i, 1); continue; }
-    if (c.givingUp) {
-      // drive away and despawn
-      c.speed = Math.min(c.speed + 200 * dt, 300);
-      c.x += Math.cos(c.angle) * c.speed * dt;
-      c.y += Math.sin(c.angle) * c.speed * dt;
-      if (dist(c.x, c.y, p.x, p.y) > 1100) {
-        const ci = S.cars.indexOf(c); if (ci >= 0) S.cars.splice(ci, 1);
-        S.cops.splice(i, 1);
-      }
-      continue;
-    }
-    if (c.parked) {
-      // roadblock car: stays, but rams if player gets close
-      if (dist(c.x, c.y, p.x, p.y) < 130 && p.car) {
-        c.parked = false;
-      }
-      continue;
-    }
-    // pursuit steering: aim at player, with some error at low stars
-    const err = S.wanted <= 1 ? rand(-0.25, 0.25) : 0;
-    const wantAngle = Math.atan2(p.y - c.y, p.x - c.x) + err;
-    c.angle += clamp(angleDiff(c.angle, wantAngle), -3.2 * dt, 3.2 * dt);
-    const top = c.def.max * (0.82 + S.wanted * 0.05);
-    c.speed += clamp(top - c.speed, -500 * dt, 320 * dt);
-    c.x += Math.cos(c.angle) * c.speed * dt;
-    c.y += Math.sin(c.angle) * c.speed * dt;
-    // ram the player's car
-    if (p.car && dist(c.x, c.y, p.car.x, p.car.y) < 56) {
-      p.car.health -= 14 * dt;
-      p.car.speed *= 0.94;
-      c.speed *= 0.8;
-      if (Math.random() < dt * 4) spawnParticles(p.car.x, p.car.y, 5, '#c9c9c9', 90, 0.4, 3);
-    }
-    // cop shoots at player on foot when close
-    if (p.onFoot && dist(c.x, c.y, p.x, p.y) < 320) {
-      c.shootT = (c.shootT || 0) - dt;
-      if (c.shootT <= 0) {
-        c.shootT = rand(0.7, 1.4);
-        damagePlayer(6, 'police');
-        S.bullets.push({ x: c.x, y: c.y, vx: Math.cos(wantAngle) * 620, vy: Math.sin(wantAngle) * 620, life: 0.8, from: 'cop' });
-        sfx('shot');
+  wantedCount() {
+    const w = this.world.player.wanted;
+    return Math.min(5, w);
+  }
+
+  update(dt) {
+    const w = this.world;
+    const p = w.player;
+    this.spawnTimer -= dt;
+    // Heat cools when the player is slow, hidden and far from any cruiser.
+    if (p.wanted > 0) {
+      const nearestCop = this.nearestCopDist();
+      const quiet = Math.abs(p.speed || 0) < 30 && nearestCop > 500;
+      if (quiet) {
+        p.wantedHeat -= dt * 6;
+        if (p.wantedHeat <= 0) {
+          p.wanted = 0;
+          p.wantedHeat = 0;
+          showMessage(w, "You lost the cops. Heat is off.", 3);
+        }
+      } else {
+        p.wantedHeat = Math.min(100, p.wantedHeat + dt * 2);
       }
     }
-    // busted: cop touches player on foot
-    if (p.onFoot && dist(c.x, c.y, p.x, p.y) < 30) {
-      S.bustedTimer += dt;
-      if (S.bustedTimer > 1.2) {
-        S.bustedTimer = 0;
-        window.__veloraBusted && window.__veloraBusted();
+    // Spawn cruisers up to the wanted level — but only while the player is
+    // moving or a cruiser is already close: a still, hidden player is not
+    // "seen", so no fresh cruiser materialises on top of them.
+    const want = this.wantedCount();
+    const playerVisible = Math.abs(p.speed || 0) > 40 || this.nearestCopDist() < 700;
+    if (want > 0 && playerVisible && w.police.length < want + 1 && this.spawnTimer <= 0) {
+      this.spawnCruiser();
+      this.spawnTimer = 2.5;
+    }
+    // Helicopter at 4+ stars.
+    if (p.wanted >= 4 && !w.heli) {
+      w.heli = { x: p.x + 300, y: p.y - 300, angle: 0 };
+      showMessage(w, "VCPD helicopter overhead! The spotlight is on you.", 3);
+    }
+    if (p.wanted < 4 && w.heli) w.heli = null;
+    if (w.heli) {
+      const h = w.heli;
+      h.angle += dt * 0.4;
+      h.x += (p.x + Math.cos(h.angle) * 320 - h.x) * dt * 0.8;
+      h.y += (p.y + Math.sin(h.angle) * 320 - h.y) * dt * 0.8;
+    }
+    // Roadblocks at 3+ stars, refreshed every few seconds.
+    this.roadblockTimer -= dt;
+    if (p.wanted >= 3 && this.roadblockTimer <= 0 && w.roadblocks.length < 2) {
+      this.spawnRoadblock();
+      this.roadblockTimer = 6;
+    }
+    if (p.wanted < 3) w.roadblocks.length = 0;
+    // Chase behaviour: seek the player, ram, and bust them when slow.
+    // A cruiser that falls more than 1500 away loses the trail and leaves.
+    for (let ci = w.police.length - 1; ci >= 0; ci--) {
+      const cop = w.police[ci];
+      const dLost = dist(cop.x, cop.y, p.x, p.y);
+      if (dLost > 1500) { w.police.splice(ci, 1); continue; }
+      steerToward(cop, p.x, p.y, dt);
+      const d = dist(cop.x, cop.y, p.x, p.y);
+      const control = { throttle: d > 40 ? 1 : 0.4, steer: 0, brake: d < 25 };
+      updateVehiclePhysics(w, cop, dt, control);
+      // Far off, cruisers cruise instead of sprinting: the player can break away.
+      cop.speed = clamp(cop.speed, 0, d > 700 ? 150 : cop.topSpeed);
+      if (d < 34 && (!this.game || !this.game.shotScene)) {
+        // Ram: damage the player's car or the player, and slow them.
+        // (Staged screenshot scenes are cosmetic only: no wreck, no bust.)
+        if (p.vehicle) {
+          p.vehicle.health -= 6 * dt * 10;
+          p.speed *= 0.92;
+          if (this.game && this.game.audio) this.game.audio.crash();
+        } else {
+          hurtPlayer(w, 8 * dt * 10);
+        }
+        if (Math.abs(p.speed || 0) < 25 && !p.onFoot) {
+          // Busted: slow and cornered in a car.
+          if (d < 30 && w.police.length >= 2) this.bustPlayer();
+        }
+        if (!p.onFoot && p.vehicle && p.vehicle.health <= 0) {
+          showMessage(w, "Your car is wrecked! Run!", 3);
+          if (this.game && this.game.playerController) this.game.playerController.exitVehicle();
+        }
       }
-    } else {
-      S.bustedTimer = Math.max(0, S.bustedTimer - dt);
     }
-    // cop car destroyed?
-    if (c.health <= 0) {
-      c.dead = true;
-      const ci = S.cars.indexOf(c); if (ci >= 0) S.cars.splice(ci, 1);
-      S.cops.splice(i, 1);
-      S.stats.kills++;
-      addHeat(10);
+    // Despawn cruisers that fell far behind once the heat is gone.
+    if (p.wanted === 0) {
+      for (let i = w.police.length - 1; i >= 0; i--) {
+        if (dist(w.police[i].x, w.police[i].y, p.x, p.y) > 1200) w.police.splice(i, 1);
+      }
     }
-    // siren wail occasionally
-    c.sirenT = (c.sirenT || 0) - dt;
-    if (c.sirenT <= 0 && dist(c.x, c.y, p.x, p.y) < 700) { c.sirenT = rand(2.5, 4.5); sfx('siren'); }
+    if (this.game && this.game.audio) {
+      this.game.audio.setSiren(w.police.length > 0);
+    }
   }
-}
 
-export function drawHeli(ctx) {
-  const h = S.heli;
-  if (!h) return;
-  ctx.save();
-  ctx.translate(h.x, h.y);
-  // searchlight cone to player
-  const p = S.player;
-  ctx.fillStyle = 'rgba(255,244,180,0.10)';
-  ctx.beginPath();
-  ctx.moveTo(0, 0);
-  ctx.lineTo(p.x - h.x - 40, p.y - h.y);
-  ctx.lineTo(p.x - h.x + 40, p.y - h.y);
-  ctx.closePath(); ctx.fill();
-  ctx.fillStyle = 'rgba(255,244,180,0.35)';
-  ctx.beginPath(); ctx.arc(p.x - h.x, p.y - h.y, 46, 0, 7); ctx.fill();
-  // body
-  ctx.fillStyle = '#1a2a4d';
-  ctx.beginPath(); ctx.ellipse(0, 0, 26, 12, 0, 0, 7); ctx.fill();
-  ctx.fillStyle = '#9fd8ff';
-  ctx.beginPath(); ctx.ellipse(14, 0, 8, 6, 0, 0, 7); ctx.fill();
-  // rotor
-  const rot = S.time * 40;
-  ctx.strokeStyle = 'rgba(200,200,200,0.8)'; ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(Math.cos(rot) * 34, Math.sin(rot) * 34);
-  ctx.lineTo(-Math.cos(rot) * 34, -Math.sin(rot) * 34);
-  ctx.stroke();
-  ctx.restore();
+  nearestCopDist() {
+    const w = this.world;
+    const p = w.player;
+    let best = Infinity;
+    for (const cop of w.police) best = Math.min(best, dist(cop.x, cop.y, p.x, p.y));
+    return best;
+  }
+
+  spawnCruiser() {
+    const w = this.world;
+    const p = w.player;
+    const pt = randomRoadPoint(w.rng);
+    const cop = spawnVehicle(w, "police", pt.x, pt.y, 0);
+    cop.driver = "police";
+    // Move it out of the parked pool and into the police list.
+    const idx = w.vehicles.indexOf(cop);
+    if (idx >= 0) w.vehicles.splice(idx, 1);
+    cop.x = clamp(p.x + (w.rng() < 0.5 ? -1 : 1) * (350 + w.rng() * 300), 100, 3100);
+    cop.y = clamp(p.y + (w.rng() < 0.5 ? -1 : 1) * (350 + w.rng() * 300), 100, 3100);
+    w.police.push(cop);
+    return cop;
+  }
+
+  spawnRoadblock() {
+    const w = this.world;
+    const p = w.player;
+    const ahead = p.angle;
+    const bx = p.x + Math.cos(ahead) * 420;
+    const by = p.y + Math.sin(ahead) * 420;
+    w.roadblocks.push({ x: clamp(bx, 120, 3080), y: clamp(by, 120, 3080), angle: ahead + Math.PI / 2 });
+    showMessage(w, "Roadblock ahead! Find another way around.", 3);
+  }
+
+  raiseWanted(stars) {
+    const w = this.world;
+    setWanted(w, Math.max(w.player.wanted, stars));
+  }
+
+  bustPlayer() {
+    const w = this.world;
+    const p = w.player;
+    if (w.gameOver) return;
+    w.gameOver = "busted";
+    p.cash = Math.max(0, p.cash - 200);
+    showMessage(w, "BUSTED! The VCPD took $200 and your car.", 4);
+  }
+
+  respawnAtHospital() {
+    const w = this.world;
+    const p = w.player;
+    p.x = 500;
+    p.y = 2500;
+    p.health = 100;
+    p.armor = 0;
+    p.wanted = 0;
+    p.wantedHeat = 0;
+    p.onFoot = true;
+    p.vehicle = null;
+    p.speed = 0;
+    w.police.length = 0;
+    w.heli = null;
+    w.roadblocks.length = 0;
+    w.gameOver = null;
+    w.objective = "You woke up at St. Maria Hospital. Get back out there.";
+  }
 }

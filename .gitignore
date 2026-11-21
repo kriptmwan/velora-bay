@@ -1,2 +1,5 @@
+node_modules/
 out/
-out2/
+dist/
+.DS_Store
+*.log

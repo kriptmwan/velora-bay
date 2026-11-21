@@ -1,268 +1,221 @@
-// Velora Bay — 10-mission story chain with a generic stage engine.
-import { S, WORLD, addCash, addHeat, showToast, say, updateStars } from './state.js';
-import { MISSION_DIALOGUE } from './story.js';
-import { makeCar } from './vehicles.js';
-import { spawnEnemy } from './combat.js';
-import { dist, rand, pick } from './utils.js';
-import { sfx } from './audio.js';
+// missions.js — the ten-mission story arc: Rex Delgado, a cab driver who
+// owes the wrong people money, climbs from his first fare to the takedown
+// of the Kane Syndicate. Each mission is a list of objectives the system
+// walks through: reach a marker, survive a chase, defeat enemies, deliver.
 
-const B = WORLD.block; // 340
-const P = (i, j, ox = 170, oy = 170) => ({ x: i * B + ox, y: j * B + oy });
+import { addCash, showMessage, showBanner, setWanted } from "./state.js";
+import { dist } from "./utils.js";
 
-// Stage types: goto | drive | kill | pickup | deliver | escape | tail | race | survive
 export const MISSIONS = [
-  { id: 'm1', title: 'FIRST FARE', giver: 'Mama Luz', reward: 300,
-    brief: 'Drive the taxi. Two fares, no excuses.',
-    stages: [
-      { type: 'goto', at: P(2, 3), text: 'Get in the taxi at the Coral Cafe', radius: 90, needCar: 'taxi' },
-      { type: 'drive', at: P(8, 2), text: 'Fare 1: drop off at the Marina', radius: 110 },
-      { type: 'drive', at: P(6, 8), text: 'Fare 2: drop off at the Neon Strip', radius: 110 },
-    ] },
-  { id: 'm2', title: "LUZ'S ERRAND", giver: 'Mama Luz', reward: 400,
-    brief: 'Pick up a package at the Marina, deliver it to the Coral Cafe. Quietly.',
-    stages: [
-      { type: 'pickup', at: P(10, 2), text: 'Pick up the package at the Marina Pier', radius: 80 },
-      { type: 'deliver', at: P(3, 4), text: 'Deliver the package to the Coral Cafe', radius: 90 },
-    ] },
-  { id: 'm3', title: 'HOT WHEELS', giver: 'Dante Cole', reward: 900,
-    brief: 'Steal the cherry-red Comet GT from the showroom. Lose the heat.',
-    stages: [
-      { type: 'goto', at: P(7, 6), text: 'Reach Comet Motors on the Strip', radius: 90, needCar: 'sports' },
-      { type: 'escape', at: P(2, 8), text: 'Lose the cops, then reach Dante\'s Garage', radius: 120, needHeat: 0 },
-    ] },
-  { id: 'm4', title: 'THE SHAKEDOWN', giver: 'Mama Luz', reward: 700,
-    brief: 'Three Kane extortionists are shaking down the Strip. Teach them manners.',
-    stages: [
-      { type: 'kill', at: P(8, 7), text: 'Deal with the extortionists on the Neon Strip (0/3)', radius: 200, count: 3, spawn: 'extortion' },
-    ] },
-  { id: 'm5', title: 'HARBOR LIGHTS', giver: 'Dante Cole', reward: 1100,
-    brief: 'Steal the Kane truck at the Harbor docks. Bring it to the garage.',
-    stages: [
-      { type: 'goto', at: P(1, 9), text: 'Reach the Kane truck at the Harbor', radius: 90, needCar: 'truck' },
-      { type: 'drive', at: P(2, 8), text: 'Deliver the truck to Dante\'s Garage', radius: 120 },
-    ] },
-  { id: 'm6', title: 'GETAWAY DRIVER', giver: 'Marisol Vega', reward: 2000,
-    brief: 'Drive the crew out of the Meridian Bank job. Lose a 3-star wanted level.',
-    stages: [
-      { type: 'goto', at: P(5, 5), text: 'Reach the Meridian Bank', radius: 100 },
-      { type: 'escape', at: P(4, 9), text: 'Escape! Lose the cops, reach the Safehouse', radius: 130, needHeat: 0, heatOnStart: 55 },
-    ] },
-  { id: 'm7', title: 'VIGILANTE NIGHTS', giver: 'Officer Cruz', reward: 1500,
-    brief: 'Four Kane enforcers meet at the Marina tonight. The law cannot touch them. You can.',
-    stages: [
-      { type: 'kill', at: P(10, 2), text: 'Take down the Kane enforcers at the Marina (0/4)', radius: 220, count: 4, spawn: 'enforcer' },
-    ] },
-  { id: 'm8', title: 'THE INFORMANT', giver: 'Marisol Vega', reward: 1800,
-    brief: 'Tail Kane\'s black courier from the Harbor. Do not let him see you. Then end it.',
-    stages: [
-      { type: 'tail', at: P(1, 9), text: 'Tail the black Vantara — stay 120-260 away', radius: 260 },
-      { type: 'kill', at: P(7, 6), text: 'End the courier', radius: 220, count: 1, spawn: 'courier' },
-    ] },
-  { id: 'm9', title: 'RACE THE DEVIL', giver: 'Dante Cole', reward: 2500,
-    brief: 'Six checkpoints, three of Kane\'s best drivers. Beat them all.',
-    stages: [
-      { type: 'race', text: 'Win the street race — hit all 6 checkpoints', radius: 120 },
-    ] },
-  { id: 'm10', title: 'KING OF VELORA', giver: 'Mama Luz', reward: 5000,
-    brief: 'Kane is in his penthouse on the Strip, guarded like a king. End him. End all of it.',
-    stages: [
-      { type: 'kill', at: P(8, 7), text: 'Fight through Kane\'s guards at the penthouse (0/5)', radius: 240, count: 5, spawn: 'guard' },
-      { type: 'kill', at: P(8, 7), text: 'Victor Kane himself. End it. (0/1)', radius: 240, count: 1, spawn: 'kane' },
-      { type: 'escape', at: P(3, 4), text: 'Escape to the Coral Cafe — Velora Bay is free', radius: 120, needHeat: 0, heatOnStart: 70 },
-    ] },
+  {
+    id: 0, title: "First Fare", reward: 300,
+    briefing: "Mama Luz: 'Rex, my cab driver called in sick. Take the Bay Cab, pick up Mrs. Alvarez at the Marina, and get her to the Neon Strip. No trouble.'",
+    objectives: [
+      { kind: "reach", text: "Get in the Bay Cab by the diner", x: 2500, y: 1750, radius: 90 },
+      { kind: "reach", text: "Pick up Mrs. Alvarez at the Marina", x: 1500, y: 500, radius: 90 },
+      { kind: "reach", text: "Drop her at the Neon Strip casino", x: 2600, y: 1200, radius: 90 },
+    ],
+  },
+  {
+    id: 1, title: "The Debt Collector", reward: 500,
+    briefing: "Dante Cole: 'Kane's boys are leaning on Mama Luz for protection money. Go to Old Town, remind them the diner is off limits.'",
+    objectives: [
+      { kind: "reach", text: "Reach the Old Town corner", x: 500, y: 2300, radius: 90 },
+      { kind: "defeat", text: "Deal with Kane's collectors (0/3)", count: 3 },
+      { kind: "reach", text: "Report back to Mama Luz", x: 2500, y: 1800, radius: 90 },
+    ],
+  },
+  {
+    id: 2, title: "Hot Wheels", reward: 700,
+    briefing: "Dante Cole: 'We need wheels that outrun the VCPD. Steal the Comet GT parked on the Strip — and lose the cops who notice.'",
+    objectives: [
+      { kind: "reach", text: "Steal the Comet GT on the Neon Strip", x: 2450, y: 1330, radius: 80 },
+      { kind: "escape", text: "Lose the cops — drop to 0 stars", seconds: 0 },
+      { kind: "reach", text: "Park the Comet at Dante's garage", x: 1300, y: 2600, radius: 90 },
+    ],
+  },
+  {
+    id: 3, title: "Harbor Nights", reward: 900,
+    briefing: "Dante Cole: 'A Kane shipment lands at Warehouse 7 tonight. Grab the crate, and don't let the guards keep it.'",
+    objectives: [
+      { kind: "reach", text: "Reach Warehouse 7 at the Harbor", x: 500, y: 1500, radius: 90 },
+      { kind: "defeat", text: "Clear the warehouse guards (0/4)", count: 4 },
+      { kind: "reach", text: "Take the crate to the diner", x: 2500, y: 1800, radius: 90 },
+    ],
+  },
+  {
+    id: 4, title: "The Informant", reward: 1100,
+    briefing: "Mama Luz: 'A Kane accountant wants out. Pick him up at the Marina before Kane's hitmen find him — then get him to the church.'",
+    objectives: [
+      { kind: "reach", text: "Pick up the informant at the Marina", x: 1300, y: 300, radius: 90 },
+      { kind: "defeat", text: "Fight off the hitmen (0/3)", count: 3 },
+      { kind: "reach", text: "Deliver him to the Old Town church", x: 400, y: 2400, radius: 90 },
+    ],
+  },
+  {
+    id: 5, title: "Bank Job", reward: 2500,
+    briefing: "Dante Cole: 'The big one. Velora Bank, downtown. Get in, grab the Syndicate's ledger cash, and get out before the VCPD locks the block down.'",
+    objectives: [
+      { kind: "reach", text: "Reach Velora Bank downtown", x: 1700, y: 1300, radius: 90 },
+      { kind: "defeat", text: "Overcome the bank guards (0/4)", count: 4 },
+      { kind: "reach", text: "Escape with the cash to the Hills", x: 2300, y: 2300, radius: 110 },
+    ],
+  },
+  {
+    id: 6, title: "Ambush at the Docks", reward: 1800,
+    briefing: "Dante Cole: 'Kane knows about the bank job. His crew is waiting at the docks. Walk in ready — or don't walk in at all.'",
+    objectives: [
+      { kind: "reach", text: "Reach the Harbor docks", x: 300, y: 1500, radius: 90 },
+      { kind: "defeat", text: "Survive the ambush (0/6)", count: 6 },
+      { kind: "reach", text: "Rendezvous with Dante at the Pier", x: 1600, y: 3000, radius: 100 },
+    ],
+  },
+  {
+    id: 7, title: "Getaway Driver", reward: 1500,
+    briefing: "Dante Cole: 'Mama Luz's nephew lifted a Syndicate car. The whole VCPD is on him. Drive him out of the city dragnet — fast.'",
+    objectives: [
+      { kind: "reach", text: "Pick up the nephew in Downtown", x: 1400, y: 1400, radius: 90 },
+      { kind: "escape", text: "Shake the wanted level to 0 stars", seconds: 0 },
+      { kind: "reach", text: "Drop him at the Beach safehouse", x: 1600, y: 2900, radius: 100 },
+    ],
+  },
+  {
+    id: 8, title: "Rooftop Meeting", reward: 2200,
+    briefing: "Mama Luz: 'Kane's lieutenant meets his buyers on a Downtown rooftop. Climb up there, end the meeting, and take his ledger.'",
+    objectives: [
+      { kind: "reach", text: "Reach Kane Tower downtown", x: 1500, y: 1500, radius: 100 },
+      { kind: "defeat", text: "Take down the rooftop crew (0/5)", count: 5 },
+      { kind: "reach", text: "Bring the ledger to Dante", x: 1300, y: 2600, radius: 90 },
+    ],
+  },
+  {
+    id: 9, title: "King of Velora", reward: 5000,
+    briefing: "Mama Luz: 'This is it, Rex. Kane himself, at his Hills estate. End the Syndicate tonight — and Velora Bay is yours.'",
+    objectives: [
+      { kind: "reach", text: "Storm the Kane Estate in the Hills", x: 2600, y: 2600, radius: 110 },
+      { kind: "defeat", text: "Defeat Kane's guards (0/8)", count: 8 },
+      { kind: "reach", text: "Confront Kane at the estate", x: 2700, y: 2700, radius: 80 },
+    ],
+  },
 ];
 
-export function currentMissionDef() { return MISSIONS[S.missionIndex] || null; }
+export class MissionSystem {
+  constructor(world, game) {
+    this.world = world;
+    this.game = game;
+  }
 
-export function startMission(i) {
-  const def = MISSIONS[i];
-  if (!def) return false;
-  S.mission = { def, stage: 0, data: {}, startedAt: S.time, kills: 0 };
-  S.missionIndex = i;
-  const dlg = MISSION_DIALOGUE[def.id + '_start'];
-  if (dlg) for (const [who, text] of dlg) say(who, text);
-  setBanner(def.title, stageText(def.stages[0]), def.brief);
-  showToast('MISSION: ' + def.title, 3);
-  sfx('mission');
-  enterStage(def.stages[0]);
-  return true;
-}
+  nextMission() {
+    const done = this.world.missions.completed;
+    for (const m of MISSIONS) if (!done.includes(m.id)) return m;
+    return null;
+  }
 
-export function setBanner(title, obj, sub = '') {
-  S.missionBanner = { title, obj, sub };
-  const t = document.getElementById('missiontitle');
-  const o = document.getElementById('missionobj');
-  const s = document.getElementById('missionsub');
-  if (t) t.textContent = title;
-  if (o) o.textContent = obj;
-  if (s) s.textContent = sub;
-}
+  startMission(id) {
+    const w = this.world;
+    const def = MISSIONS.find((m) => m.id === id);
+    if (!def) return false;
+    if (w.missions.active) return false;
+    w.missions.index = id;
+    w.missions.active = { def, stage: 0, killsAtStart: w.player.kills, timer: 0 };
+    w.objective = def.objectives[0].text;
+    showBanner(w, def.title + " — " + def.objectives[0].text, 6);
+    showMessage(w, def.briefing, 8);
+    if (this.game && this.game.audio) this.game.audio.pickup();
+    return true;
+  }
 
-function stageText(stage) {
-  if (!stage) return '';
-  return stage.text;
-}
-
-function enterStage(stage) {
-  const m = S.mission;
-  if (!m) return;
-  m.data = {};
-  if (stage.type === 'kill') {
-    m.data.need = stage.count;
-    m.data.kills = 0;
-    for (let k = 0; k < stage.count; k++) {
-      const hp = stage.spawn === 'kane' ? 220 : stage.spawn === 'guard' ? 130 : 100;
-      spawnEnemy(stage.at.x + rand(-90, 90), stage.at.y + rand(-90, 90), hp, stage.spawn);
+  startNext() {
+    const next = this.nextMission();
+    if (!next) {
+      showMessage(this.world, "Every mission is done. You are the King of Velora.", 6);
+      return false;
     }
+    return this.startMission(next.id);
   }
-  if (stage.type === 'tail') {
-    const c = makeCar('sedan', stage.at.x, stage.at.y, 0, { color: '#111111', driver: 'courier' });
-    S.cars.push(c);
-    m.data.tailCar = c;
-    m.data.tailPath = [P(1, 9), P(4, 9), P(4, 6), P(7, 6), P(7, 4), P(8, 4)];
-    m.data.tailWp = 0;
-    m.data.spotted = 0;
-  }
-  if (stage.type === 'race') {
-    window.__veloraStartRace && window.__veloraStartRace();
-  }
-  if (stage.heatOnStart) {
-    S.wantedHeat = Math.max(S.wantedHeat, stage.heatOnStart);
-    S.lastCrime = S.time;
-    updateStars();
-  }
-  setBanner(m.def.title, stageText(stage), m.def.brief);
-}
 
-export function updateMission(dt) {
-  const m = S.mission;
-  if (!m) {
-    const def = currentMissionDef();
-    if (def && !S.missionDone[def.id] && S.mode === 'play' && !S.shotMode) {
-      startMission(S.missionIndex);
-    }
-    return;
+  marker() {
+    const a = this.world.missions.active;
+    if (!a) return null;
+    const obj = a.def.objectives[a.stage];
+    if (!obj || obj.kind === "defeat" || obj.kind === "escape") return null;
+    return { x: obj.x, y: obj.y, text: obj.text };
   }
-  const stage = m.def.stages[m.stage];
-  if (!stage) return;
-  const p = S.player;
-  const d = dist(p.x, p.y, stage.at ? stage.at.x : 0, stage.at ? stage.at.y : 0);
-  switch (stage.type) {
-    case 'goto':
-      if (d < stage.radius) {
-        if (stage.needCar) {
-          if (!p.onFoot && p.car && p.car.model === stage.needCar) advanceStage();
-          else if (!p.onFoot && p.car) setBanner(m.def.title, 'Wrong car! You need a ' + stage.needCar, m.def.brief);
-          else setBanner(m.def.title, 'Get in a ' + stage.needCar + ' first', m.def.brief);
-        } else advanceStage();
+
+  update(dt) {
+    const w = this.world;
+    const a = w.missions.active;
+    if (!a) return;
+    a.timer += dt;
+    const obj = a.def.objectives[a.stage];
+    if (!obj) { this.completeMission(); return; }
+    const p = w.player;
+    if (obj.kind === "reach") {
+      if (dist(p.x, p.y, obj.x, obj.y) < obj.radius) this.advanceStage();
+    } else if (obj.kind === "defeat") {
+      const killed = p.kills - a.killsAtStart;
+      w.objective = obj.text.replace(/\(0\/\d+\)/, "(" + Math.min(killed, obj.count) + "/" + obj.count + ")");
+      if (killed >= obj.count) this.advanceStage();
+    } else if (obj.kind === "escape") {
+      if (p.wanted === 0) this.advanceStage();
+    }
+    // Entering a mission with enemies: spawn the objective's guards.
+    if (obj.kind === "defeat" && !a.spawnedForStage && w.enemies.length === 0) {
+      a.spawnedForStage = true;
+      const cx = obj.x || p.x;
+      const cy = obj.y || p.y;
+      for (let i = 0; i < obj.count; i++) {
+        const ex = cx + (w.rng() - 0.5) * 300;
+        const ey = cy + (w.rng() - 0.5) * 300;
+        if (this.game && this.game.combat) this.game.combat.spawnEnemy(ex, ey, 60);
       }
-      break;
-    case 'drive':
-      if (!p.onFoot && d < stage.radius) advanceStage();
-      break;
-    case 'pickup':
-      if (d < stage.radius) { addCash(0); showToast('Package picked up', 2); sfx('pickup'); advanceStage(); }
-      break;
-    case 'deliver':
-      if (d < stage.radius) advanceStage();
-      break;
-    case 'escape':
-      if (S.wanted === 0 && d < stage.radius) advanceStage();
-      else if (S.wanted > 0) setBanner(m.def.title, 'Lose the cops first! (' + S.wanted + '★) Then reach the marker', m.def.brief);
-      break;
-    case 'kill': {
-      const txt = stage.text.replace(/\(\d+\/\d+\)/, `(${m.data.kills || 0}/${m.data.need})`);
-      setBanner(m.def.title, txt, m.def.brief);
-      if ((m.data.kills || 0) >= m.data.need) advanceStage();
-      break;
+      setWanted(w, Math.max(p.wanted, 2));
+      showMessage(w, "Kane's men are here. Take them down!", 3);
     }
-    case 'tail': {
-      const c = m.data.tailCar;
-      if (!c || c.dead) { advanceStage(); break; }
-      // move courier along path
-      const wp = m.data.tailPath[m.data.tailWp];
-      const cd = dist(c.x, c.y, wp.x, wp.y);
-      if (cd < 40) m.data.tailWp = (m.data.tailWp + 1) % m.data.tailPath.length;
-      const a = Math.atan2(wp.y - c.y, wp.x - c.x);
-      c.angle = a; c.speed = 150;
-      c.x += Math.cos(a) * 150 * dt; c.y += Math.sin(a) * 150 * dt;
-      const pd = dist(p.x, p.y, c.x, c.y);
-      if (pd < 110) {
-        m.data.spotted += dt;
-        setBanner(m.def.title, 'TOO CLOSE! He sees you! Back off!', m.def.brief);
-        if (m.data.spotted > 2.5) { failMission('You were spotted tailing the courier.'); return; }
-      } else if (pd > 300) {
-        setBanner(m.def.title, 'You lost him! Get closer!', m.def.brief);
-        m.data.lost = (m.data.lost || 0) + dt;
-        if (m.data.lost > 8) { failMission('You lost the courier.'); return; }
-      } else {
-        m.data.lost = 0;
-        setBanner(m.def.title, stage.text, m.def.brief);
-      }
-      break;
+  }
+
+  advanceStage() {
+    const w = this.world;
+    const a = w.missions.active;
+    if (!a) return;
+    a.stage++;
+    a.killsAtStart = w.player.kills;
+    a.spawnedForStage = false;
+    const next = a.def.objectives[a.stage];
+    if (!next) { this.completeMission(); return; }
+    w.objective = next.text;
+    showBanner(w, next.text, 4);
+    if (this.game && this.game.audio) this.game.audio.pickup();
+  }
+
+  completeMission() {
+    const w = this.world;
+    const a = w.missions.active;
+    if (!a) return;
+    const def = a.def;
+    w.missions.completed.push(def.id);
+    w.missions.active = null;
+    w.stats.missionsDone++;
+    addCash(w, def.reward);
+    w.player.respect += 10;
+    w.objective = "Mission passed! Press M for your next mission.";
+    showBanner(w, "MISSION PASSED — " + def.title + "  +$" + def.reward, 6);
+    showMessage(w, def.title + " complete. You earned $" + def.reward + ".", 5);
+    if (this.game && this.game.audio) this.game.audio.missionPass();
+    if (this.game && this.game.menus) this.game.menus.showMissionPassed(def);
+    if (w.missions.completed.length >= MISSIONS.length) {
+      w.objective = "KING OF VELORA — the Syndicate is finished. Free roam!";
+      showBanner(w, "KING OF VELORA — you own this city now.", 8);
     }
-    case 'race':
-      if (S.race && S.race.won) advanceStage();
-      else if (S.race && S.race.lost) failMission('You lost the race. Dante is not impressed.');
-      break;
   }
-}
 
-export function onEnemyKilled(e) {
-  const m = S.mission;
-  if (!m) return;
-  const stage = m.def.stages[m.stage];
-  if (stage && stage.type === 'kill') {
-    m.data.kills = (m.data.kills || 0) + 1;
+  failMission(reason) {
+    const w = this.world;
+    const a = w.missions.active;
+    if (!a) return;
+    w.missions.active = null;
+    w.missions.failed++;
+    w.objective = "Mission failed — " + reason + ". Press M to retry.";
+    showBanner(w, "MISSION FAILED — " + reason, 5);
   }
-}
-
-function advanceStage() {
-  const m = S.mission;
-  m.stage++;
-  if (m.stage >= m.def.stages.length) {
-    completeMission();
-    return;
-  }
-  sfx('pickup');
-  enterStage(m.def.stages[m.stage]);
-}
-
-export function completeMission() {
-  const m = S.mission;
-  if (!m) return;
-  const def = m.def;
-  S.missionDone[def.id] = true;
-  S.stats.missionsDone++;
-  addCash(def.reward);
-  S.respect += 10;
-  S.mission = null;
-  S.missionIndex = Math.min(S.missionIndex + 1, MISSIONS.length - 1);
-  sfx('mission');
-  showToast('MISSION PASSED — ' + def.title + '  +$' + def.reward, 4);
-  if (def.id === 'm10') {
-    const dlg = MISSION_DIALOGUE.m10_end;
-    if (dlg) for (const [who, text] of dlg) say(who, text);
-    setBanner('VELORA BAY IS FREE', 'You are the King of Velora Bay. Free roam — the city is yours.', 'All 10 missions complete!');
-  } else {
-    setBanner('MISSION PASSED', def.title + ' — next: ' + (MISSIONS[S.missionIndex] ? MISSIONS[S.missionIndex].title : 'free roam'), 'Reward $' + def.reward);
-  }
-  window.__veloraMissionPassed && window.__veloraMissionPassed(def);
-}
-
-export function failMission(reason) {
-  const m = S.mission;
-  if (!m) return;
-  const def = m.def;
-  S.mission = null;
-  S.enemies = S.enemies.filter(e => e.dead);
-  showToast('MISSION FAILED — ' + reason, 4);
-  sfx('fail');
-  setBanner('MISSION FAILED', def.title + ' — ' + reason, 'Talk to ' + def.giver + ' to retry. Press TAB for missions.');
-  window.__veloraMissionFailed && window.__veloraMissionFailed(def, reason);
-}
-
-export function retryMission() {
-  const def = currentMissionDef();
-  if (def) startMission(S.missionIndex);
 }

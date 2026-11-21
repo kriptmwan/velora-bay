@@ -1,47 +1,99 @@
-// Velora Bay — save/load via localStorage.
-import { S } from './state.js';
+// save.js — save / load through localStorage. The save holds the player's
+// position, cash, health, armor, wanted level, weapons, owned cars, mission
+// progress and side-activity stats — everything needed to resume a run.
+
+import { SAVE_KEY } from "./state.js";
+
+export function saveGame(world) {
+  try {
+    const p = world.player;
+    const data = {
+      version: 1,
+      savedAt: Date.now(),
+      player: {
+        x: p.x, y: p.y, angle: p.angle, health: p.health, armor: p.armor,
+        cash: p.cash, wanted: p.wanted, weapon: p.weapon, ammo: p.ammo,
+        outfit: p.outfit, kills: p.kills, respect: p.respect,
+      },
+      timeOfDay: world.timeOfDay,
+      missionsCompleted: world.missions.completed.slice(),
+      stats: { ...world.stats },
+      ownedCars: world.ownedCars.slice(),
+      packagesFound: world.packages.filter((k) => k.taken).length,
+      raceBest: { ...world.race.best },
+    };
+    window.localStorage.setItem(SAVE_KEY, JSON.stringify(data));
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+export function loadGame(world) {
+  try {
+    const raw = window.localStorage.getItem(SAVE_KEY);
+    if (!raw) return null;
+    const data = JSON.parse(raw);
+    if (!data || data.version !== 1) return null;
+    const p = world.player;
+    p.x = data.player.x;
+    p.y = data.player.y;
+    p.angle = data.player.angle;
+    p.health = data.player.health;
+    p.armor = data.player.armor;
+    p.cash = data.player.cash;
+    p.wanted = data.player.wanted;
+    p.weapon = data.player.weapon;
+    p.ammo = { ...p.ammo, ...data.player.ammo };
+    p.outfit = data.player.outfit;
+    p.kills = data.player.kills;
+    p.respect = data.player.respect;
+    p.onFoot = true;
+    p.vehicle = null;
+    world.timeOfDay = data.timeOfDay;
+    world.missions.completed = data.missionsCompleted.slice();
+    world.stats = { ...world.stats, ...data.stats };
+    world.ownedCars = data.ownedCars.slice();
+    // Restore taken packages by index order.
+    let taken = data.packagesFound || 0;
+    for (const pk of world.packages) {
+      if (taken > 0) { pk.taken = true; taken--; }
+    }
+    world.race.best = { ...data.raceBest };
+    return data;
+  } catch (e) {
+    return null;
+  }
+}
 
 export function hasSave() {
-  try { return !!localStorage.getItem(S.saveSlot); } catch (e) { return false; }
+  try {
+    return !!window.localStorage.getItem(SAVE_KEY);
+  } catch (e) {
+    return false;
+  }
 }
 
-export function saveGame() {
+export function clearSave() {
   try {
-    const p = S.player;
-    const data = {
-      v: 2, cash: S.cash, respect: S.respect,
-      missionIndex: S.missionIndex, missionDone: S.missionDone,
-      stats: S.stats, packagesFound: S.packagesFound,
-      weapons: S.weapons, weapon: S.weapon,
-      dayTime: S.dayTime,
-      px: p ? p.x : 0, py: p ? p.y : 0,
-      health: p ? p.health : 100, armor: p ? p.armor : 0,
-      ownedCars: S.ownedCars,
+    window.localStorage.removeItem(SAVE_KEY);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+export function saveSummary() {
+  try {
+    const raw = window.localStorage.getItem(SAVE_KEY);
+    if (!raw) return null;
+    const data = JSON.parse(raw);
+    return {
+      savedAt: new Date(data.savedAt).toLocaleString(),
+      cash: data.player.cash,
+      missions: data.missionsCompleted.length,
     };
-    localStorage.setItem(S.saveSlot, JSON.stringify(data));
-    return true;
-  } catch (e) { return false; }
-}
-
-export function loadGame() {
-  try {
-    const raw = localStorage.getItem(S.saveSlot);
-    if (!raw) return false;
-    const d = JSON.parse(raw);
-    if (!d || d.v !== 2) return false;
-    S.cash = d.cash; S.respect = d.respect || 0;
-    S.missionIndex = d.missionIndex || 0;
-    S.missionDone = d.missionDone || {};
-    S.stats = Object.assign(S.stats, d.stats || {});
-    S.packagesFound = d.packagesFound || {};
-    if (d.weapons) S.weapons = d.weapons;
-    if (d.weapon) S.weapon = d.weapon;
-    if (d.dayTime) S.dayTime = d.dayTime;
-    if (d.ownedCars) S.ownedCars = d.ownedCars;
-    const p = S.player;
-    if (p && d.px) { p.x = d.px; p.y = d.py; p.health = d.health || 100; p.armor = d.armor || 0; }
-    // re-mark found packages in the city
-    if (S.city) for (const pkg of S.city.packages) if (S.packagesFound[pkg.id]) pkg.found = true;
-    return true;
-  } catch (e) { return false; }
+  } catch (e) {
+    return null;
+  }
 }

@@ -1,118 +1,79 @@
-// Velora Bay — driving physics: arcade handling, collisions, ramps, damage, explosions.
-import { S, WORLD, addHeat } from './state.js';
-import { driveInput, pressedOnce } from './input.js';
-import { clamp, dist } from './utils.js';
-import { collideBuildings, isOnRoad } from './city.js';
-import { carsOverlap } from './vehicles.js';
-import { sfx } from './audio.js';
-import { explode, addSkid, spawnParticles, spawnSmoke } from './effects.js';
-import { exitCar } from './player.js';
+// driving.js — turns keyboard input into car control for the player's
+// vehicle: throttle, steering, braking, handbrake slides, exiting the car,
+// and stunt-jump detection when the car crosses a ramp at speed.
 
-export function updateDriving(dt) {
-  const p = S.player;
-  if (!p || p.onFoot || !p.car) return;
-  const c = p.car;
-  const inp = driveInput();
-  const def = c.def;
-  const forward = inp.up ? 1 : inp.down ? -1 : 0;
-  const steer = (inp.right ? 1 : 0) - (inp.left ? 1 : 0);
-  // acceleration
-  if (forward > 0) c.speed += def.accel * dt * (c.speed < 0 ? 2.2 : 1);
-  else if (forward < 0) c.speed -= def.brake * dt * (c.speed > 0 ? 1 : 0.55);
-  else c.speed -= Math.sign(c.speed) * Math.min(Math.abs(c.speed), 140 * dt);
-  if (inp.handbrake) c.speed -= Math.sign(c.speed) * Math.min(Math.abs(c.speed), 420 * dt);
-  c.speed = clamp(c.speed, -def.max * 0.45, def.max);
-  // steering scales with speed
-  const spd = Math.abs(c.speed);
-  const steerPower = def.grip * clamp(spd / 120, 0, 1) * (inp.handbrake ? 1.7 : 1);
-  c.angle += steer * steerPower * dt * Math.sign(c.speed || 1) * (c.speed < 0 ? -1 : 1);
-  const px = c.x, py = c.y;
-  c.x += Math.cos(c.angle) * c.speed * dt;
-  c.y += Math.sin(c.angle) * c.speed * dt;
-  // skids when drifting
-  if (inp.handbrake && spd > 200 && Math.random() < 0.7) {
-    addSkid(c.x - Math.cos(c.angle) * def.len / 2, c.y - Math.sin(c.angle) * def.len / 2, c.angle);
-  }
-  // world bounds
-  if (c.x < 30 || c.y < 30 || c.x > WORLD.size - 30 || c.y > WORLD.size - 30) {
-    c.x = clamp(c.x, 30, WORLD.size - 30); c.y = clamp(c.y, 30, WORLD.size - 30);
-    if (Math.abs(c.speed) > 150) { crashCar(c, 8); }
-    c.speed *= 0.4;
-  }
-  // building collision
-  const hitWall = collideBuildings(c, def.len / 2 - 4);
-  if (hitWall && Math.abs(c.speed) > 120) {
-    crashCar(c, Math.min(22, Math.abs(c.speed) / 22));
-    c.speed *= 0.45;
-  } else if (hitWall) c.speed *= 0.8;
-  // car-car collisions
-  for (const o of S.cars) {
-    if (o === c || o.parked && o === c) continue;
-    if (carsOverlap(c, o)) {
-      const d = dist(c.x, c.y, o.x, o.y) || 1;
-      const push = 8;
-      const nx = (c.x - o.x) / d, ny = (c.y - o.y) / d;
-      c.x += nx * push; c.y += ny * push;
-      if (!o.traffic && o.driver !== 'player') { o.x -= nx * push; o.y -= ny * push; }
-      const impact = Math.abs(c.speed) + Math.abs(o.speed || 0);
-      if (impact > 260) {
-        crashCar(c, 6); sfx('crash');
-        if (o.traffic) { o.speed = Math.max(0, o.speed - 120); o.wait = 1.2; }
-        if (o.cop) addHeat(4);
-      }
-      c.speed *= 0.86;
-    }
-  }
-  // ramps — stunt jumps
-  if (c.jumpZ === 0) {
-    for (const r of S.city.ramps) {
-      if (dist(c.x, c.y, r.x, r.y) < 46 && Math.abs(c.speed) > 200) {
-        c.jumpV = 260 + Math.abs(c.speed) * 0.35;
-        c.jumpZ = 1; c.airTime = 0;
-        sfx('jump');
-        break;
-      }
-    }
-  }
-  if (c.jumpZ > 0) {
-    c.jumpZ += c.jumpV * dt; c.jumpV -= 640 * dt; c.airTime += dt;
-    if (c.jumpZ <= 0) {
-      c.jumpZ = 0; c.jumpV = 0;
-      const air = c.airTime;
-      if (air > 0.55) {
-        const bonus = Math.round(air * 120);
-        S.cash += bonus; S.stats.jumps++;
-        window.__veloraToast && window.__veloraToast(`STUNT JUMP! +$${bonus}  (${air.toFixed(1)}s air)`);
-        spawnParticles(c.x, c.y, 14, '#ffd23f', 140, 0.6, 4);
-      }
-      c.airTime = 0;
-    }
-  }
-  // sync player to car
-  p.x = c.x; p.y = c.y; p.angle = c.angle;
-  S.stats.distanceDriven += Math.abs(c.speed) * dt;
-  // exit car
-  if (pressedOnce('e')) exitCar();
-  // horn
-  if (pressedOnce('q')) sfx('horn');
-  // car destroyed?
-  if (c.health <= 0 && !c.dead) {
-    c.dead = true;
-    explode(c.x, c.y, true);
-    exitCar();
-    p.x = c.x + 40; p.y = c.y + 40;
-    p.health = Math.max(10, p.health - 25);
-    const i = S.cars.indexOf(c);
-    if (i >= 0) S.cars.splice(i, 1);
-    addHeat(6);
-  }
-  c.brakeLight = inp.down || inp.handbrake;
-}
+import { clamp, dist } from "./utils.js";
+import { updateVehiclePhysics } from "./vehicles.js";
+import { showMessage } from "./state.js";
 
-function crashCar(c, dmg) {
-  c.health -= dmg;
-  spawnParticles(c.x, c.y, 8, '#c9c9c9', 110, 0.5, 4);
-  if (c.health < 40) spawnSmoke(c.x, c.y, 3);
-  sfx('crash');
-  S.camera.shake = Math.max(S.camera.shake, 4);
+export class DrivingController {
+  constructor(world, game) {
+    this.world = world;
+    this.game = game;
+    this.airTime = 0;
+    this.wasAirborne = false;
+  }
+
+  update(dt, input) {
+    const w = this.world;
+    const p = w.player;
+    const car = p.vehicle;
+    if (p.onFoot || !car) return;
+    if (p.fireCooldown > 0) p.fireCooldown -= dt;
+    let steer = 0;
+    if (input.left) steer -= 1;
+    if (input.right) steer += 1;
+    let throttle = 0;
+    if (input.up) throttle = 1;
+    if (input.down) throttle = -1;
+    const control = {
+      throttle,
+      steer,
+      brake: input.brake && input.up === false && throttle === 0,
+      handbrake: input.brake && throttle !== 0,
+    };
+    // Space is the brake when coasting, the handbrake while accelerating.
+    if (input.isDown(" ")) {
+      if (throttle === 0) control.brake = true;
+      else control.handbrake = true;
+    }
+    const moved = updateVehiclePhysics(w, car, dt, control);
+    p.x = car.x;
+    p.y = car.y;
+    p.angle = car.angle;
+    p.speed = car.speed;
+    w.stats.distance += moved;
+    // Stunt jumps: cross a ramp fast and the car goes airborne.
+    for (const ramp of w.ramps) {
+      if (dist(car.x, car.y, ramp.x, ramp.y) < 46 && Math.abs(car.speed) > 170) {
+        this.airTime = 0.9;
+        w.stats.stunts++;
+        showMessage(w, "STUNT JUMP! +" + Math.round(Math.abs(car.speed)) + " style points", 2.5);
+        if (this.game && this.game.effects) this.game.effects.spawnStuntBurst(car.x, car.y);
+      }
+    }
+    if (this.airTime > 0) {
+      this.airTime -= dt;
+      this.wasAirborne = true;
+    } else if (this.wasAirborne) {
+      this.wasAirborne = false;
+    }
+    // Skid smoke when handbraking at speed.
+    if (control.handbrake && Math.abs(car.speed) > 90 && this.game && this.game.effects) {
+      this.game.effects.spawnSkid(car.x, car.y, car.angle);
+    }
+    if (input.wasPressed("e")) {
+      if (this.game && this.game.playerController) this.game.playerController.exitVehicle();
+    }
+    if (input.wasPressed("f")) {
+      // F = exit and leave the engine running is the same as E here; kept
+      // as an alias so both keys the help lists actually work.
+      if (this.game && this.game.playerController) this.game.playerController.exitVehicle();
+    }
+  }
+
+  speedKmh() {
+    const p = this.world.player;
+    return Math.round(Math.abs(p.speed || 0) * 0.9);
+  }
 }

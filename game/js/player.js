@@ -1,150 +1,96 @@
-// Velora Bay — on-foot player: walk, sprint, jump, enter cars, take damage, get busted.
-import { S, WORLD, addHeat, showToast, say } from './state.js';
-import { walkInput, pressedOnce } from './input.js';
-import { collideBuildings } from './city.js';
-import { clamp, dist } from './utils.js';
-import { sfx } from './audio.js';
-import { spawnParticles } from './effects.js';
+// player.js — Rex Delgado on foot: movement, entering and leaving cars,
+// and slow health recovery when out of trouble.
 
-export function updatePlayer(dt) {
-  const p = S.player;
-  if (!p || p.dead) return;
-  p.invuln = Math.max(0, p.invuln - dt);
-  if (!p.onFoot) return;
-  const inp = walkInput();
-  let mx = (inp.right ? 1 : 0) - (inp.left ? 1 : 0);
-  let my = (inp.down ? 1 : 0) - (inp.up ? 1 : 0);
-  const len = Math.hypot(mx, my);
-  if (len > 0) { mx /= len; my /= len; }
-  const speed = inp.sprint ? 330 : 215;
-  p.x += mx * speed * dt;
-  p.y += my * speed * dt;
-  if (len > 0) {
-    p.angle = Math.atan2(my, mx);
-    p.walkPhase += dt * (inp.sprint ? 13 : 9);
-  }
-  // jump
-  if (inp.jump && p.jumpZ === 0) { p.jumpV = 320; sfx('jump'); }
-  if (p.jumpZ > 0 || p.jumpV !== 0) {
-    p.jumpZ += p.jumpV * dt; p.jumpV -= 900 * dt;
-    if (p.jumpZ <= 0) { p.jumpZ = 0; p.jumpV = 0; }
-  }
-  p.x = clamp(p.x, 16, WORLD.size - 16);
-  p.y = clamp(p.y, 16, WORLD.size - 16);
-  collideBuildings(p, 12);
-  // enter nearest car
-  if (pressedOnce('e')) tryEnterCar();
-  // weapon switch
-  if (pressedOnce('1')) setWeapon('pistol');
-  if (pressedOnce('2')) setWeapon('smg');
-  if (pressedOnce('3')) setWeapon('shotgun');
-  if (pressedOnce('4')) setWeapon('rifle');
-  // taxi job, garage, phone, mission list
-  if (pressedOnce('h')) window.__veloraTaxiToggle && window.__veloraTaxiToggle();
-  if (pressedOnce('g')) window.__veloraGarage && window.__veloraGarage();
-  if (pressedOnce('c')) window.__veloraPhone && window.__veloraPhone();
-  if (pressedOnce('tab')) window.__veloraMissionList && window.__veloraMissionList();
-}
+import { clamp } from "./utils.js";
+import { buildingHit } from "./city.js";
+import { nearestVehicle } from "./vehicles.js";
+import { showMessage, setWanted } from "./state.js";
 
-export function setWeapon(name) {
-  const w = S.weapons[name];
-  if (w && w.owned) {
-    S.weapon = name;
-    showToast(name.toUpperCase() + ' equipped', 1.2);
-  } else {
-    showToast(name.toUpperCase() + ' not owned — buy it at Ironworks Guns', 2);
+export class PlayerController {
+  constructor(world, game) {
+    this.world = world;
+    this.game = game; // for audio + effects hooks
   }
-}
 
-export function tryEnterCar() {
-  const p = S.player;
-  let best = null, bd = 70;
-  for (const c of S.cars) {
-    const d = dist(p.x, p.y, c.x, c.y);
-    if (d < bd) { bd = d; best = c; }
+  update(dt, input) {
+    const w = this.world;
+    const p = w.player;
+    if (!p.onFoot) return;
+    if (p.fireCooldown > 0) p.fireCooldown -= dt;
+    let mx = 0;
+    let my = 0;
+    if (input.up) my -= 1;
+    if (input.down) my += 1;
+    if (input.left) mx -= 1;
+    if (input.right) mx += 1;
+    const moving = mx !== 0 || my !== 0;
+    if (moving) {
+      const len = Math.hypot(mx, my);
+      mx /= len;
+      my /= len;
+      const speed = input.sprint ? 235 : 150;
+      const nx = p.x + mx * speed * dt;
+      const ny = p.y + my * speed * dt;
+      if (!buildingHit(w, nx, p.y, 12)) p.x = clamp(nx, 40, 3160);
+      if (!buildingHit(w, p.x, ny, 12)) p.y = clamp(ny, 40, 3160);
+      p.angle = Math.atan2(my, mx);
+      p.speed = speed;
+    } else {
+      p.speed = 0;
+    }
+    // Slow recovery while calm and unhurt by the law.
+    if (p.wanted === 0 && p.health > 0 && p.health < 100) {
+      p.health = Math.min(100, p.health + dt * 1.5);
+    }
+    if (input.wasPressed("e")) this.tryEnterVehicle();
   }
-  if (!best) return;
-  p.car = best; p.onFoot = false;
-  best.driver = 'player';
-  best.traffic = false; best.parked = false;
-  p.x = best.x; p.y = best.y;
-  if (best.model !== 'police' && !S.ownedCars.includes(best.id)) {
-    S.stats.carsStolen++;
-    addHeat(12);
-    showToast('Stole a ' + best.def.name + ' — the law noticed!', 2.5);
-    say('REX', 'This baby is mine now.');
-  } else {
-    showToast(best.def.name, 1.5);
-  }
-  sfx('pickup');
-}
 
-export function exitCar() {
-  const p = S.player;
-  if (!p.car) return;
-  const c = p.car;
-  const side = c.angle + Math.PI / 2;
-  p.x = c.x + Math.cos(side) * 34;
-  p.y = c.y + Math.sin(side) * 34;
-  p.onFoot = true; p.car = null;
-  c.driver = null;
-}
-
-export function damagePlayer(n, from) {
-  const p = S.player;
-  if (!p || p.dead || p.invuln > 0) return;
-  let left = n;
-  if (p.armor > 0) { const absorbed = Math.min(p.armor, left); p.armor -= absorbed; left -= absorbed; }
-  p.health -= left;
-  p.invuln = 0.25;
-  spawnParticles(p.x, p.y, 6, '#ff5b4d', 90, 0.4, 3);
-  if (p.health <= 0) {
-    p.health = 0; p.dead = true;
-    window.__veloraWasted && window.__veloraWasted(from);
+  tryEnterVehicle() {
+    const w = this.world;
+    const p = w.player;
+    const car = nearestVehicle(w, p.x, p.y, 70);
+    if (!car) {
+      showMessage(w, "No car close enough — walk up to one and press E.", 2);
+      return false;
+    }
+    const wasParked = car.driver === null;
+    if (car.driver === "traffic") {
+      // Jacking a moving car is a crime: the law notices.
+      const idx = w.traffic.indexOf(car);
+      if (idx >= 0) w.traffic.splice(idx, 1);
+      setWanted(w, Math.max(p.wanted, 1));
+      showMessage(w, "You jacked the " + car.name + "! The cops saw that.", 3);
+      if (this.game && this.game.audio) this.game.audio.crash();
+    } else if (wasParked) {
+      showMessage(w, "You took the " + car.name + ".", 2.5);
+    }
+    const vIdx = w.vehicles.indexOf(car);
+    if (vIdx >= 0) w.vehicles.splice(vIdx, 1);
+    car.driver = "player";
+    p.vehicle = car;
+    p.onFoot = false;
+    p.x = car.x;
+    p.y = car.y;
+    p.angle = car.angle;
+    p.speed = car.speed;
+    w.stats.carsStolen++;
+    return true;
   }
-}
 
-export function drawPlayer(ctx) {
-  const p = S.player;
-  if (!p || !p.onFoot || p.dead) return;
-  ctx.save();
-  ctx.translate(p.x, p.y - p.jumpZ * 0.12);
-  // hero ring so Rex always reads at a glance
-  ctx.strokeStyle = 'rgba(255,255,255,0.85)';
-  ctx.lineWidth = 2;
-  ctx.beginPath(); ctx.ellipse(0, 7, 11, 5, 0, 0, 7); ctx.stroke();
-  ctx.fillStyle = 'rgba(255,210,63,0.25)';
-  ctx.beginPath(); ctx.ellipse(0, 7, 11, 5, 0, 0, 7); ctx.fill();
-  const bob = Math.sin(p.walkPhase) * 1.6;
-  ctx.fillStyle = 'rgba(0,0,0,0.35)';
-  ctx.beginPath(); ctx.ellipse(0, 6, 8, 3.5, 0, 0, 7); ctx.fill();
-  // legs
-  ctx.fillStyle = '#2e3d5c';
-  const sw = Math.sin(p.walkPhase) * 3.5;
-  ctx.fillRect(-4 + sw * 0.4, 0, 3.5, 8);
-  ctx.fillRect(0.5 - sw * 0.4, 0, 3.5, 8);
-  // jacket — Rex wears a teal jacket
-  ctx.fillStyle = '#0e7a6b';
-  ctx.beginPath(); ctx.roundRect(-6, -10 + bob * 0.3, 12, 13, 5); ctx.fill();
-  ctx.fillStyle = '#ffd23f';
-  ctx.fillRect(-6, -4 + bob * 0.3, 12, 2);
-  // head
-  ctx.fillStyle = '#e8b88a';
-  ctx.beginPath(); ctx.arc(0, -15 + bob * 0.3, 5.5, 0, 7); ctx.fill();
-  ctx.fillStyle = '#1a1a1a';
-  ctx.beginPath(); ctx.arc(0, -17 + bob * 0.3, 5.5, Math.PI, 0); ctx.fill();
-  // gun in hand when aiming
-  const aiming = S.mouse.down || S.keys['f'];
-  if (aiming) {
-    ctx.rotate(p.angle);
-    ctx.fillStyle = '#222';
-    ctx.fillRect(4, -2, 12, 3);
-    ctx.rotate(-p.angle);
-  }
-  ctx.restore();
-  // aim line
-  if (aiming && S.mode === 'play') {
-    ctx.strokeStyle = 'rgba(255,255,255,0.25)';
-    ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(S.mouse.wx, S.mouse.wy); ctx.stroke();
+  exitVehicle() {
+    const w = this.world;
+    const p = w.player;
+    if (!p.vehicle || p.onFoot) return false;
+    const car = p.vehicle;
+    car.driver = null;
+    car.speed = 0;
+    w.vehicles.push(car);
+    p.vehicle = null;
+    p.onFoot = true;
+    p.x = car.x + Math.cos(car.angle + Math.PI / 2) * 34;
+    p.y = car.y + Math.sin(car.angle + Math.PI / 2) * 34;
+    p.angle = car.angle;
+    p.speed = 0;
+    return true;
   }
 }

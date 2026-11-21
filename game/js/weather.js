@@ -1,53 +1,76 @@
-// Velora Bay — day/night cycle and weather.
-import { S } from './state.js';
-import { rand, clamp } from './utils.js';
+// weather.js — day/night cycle plus rain. The clock advances slowly in
+// play (one full day per ~8 minutes) and the renderer asks this system
+// whether it is night and how hard it is raining.
 
-export function updateWeather(dt) {
-  S.dayTime = (S.dayTime + dt * 60) % 86400; // 1 real second = 1 game minute
-  S.weatherTimer -= dt;
-  if (S.weatherTimer <= 0) {
-    S.weatherTimer = rand(180, 420);
-    const r = Math.random();
-    S.weather = r < 0.6 ? 'clear' : r < 0.8 ? 'cloudy' : 'rain';
-    if (S.weather === 'rain') {
-      for (let i = 0; i < 120; i++) S.rainDrops.push({ x: rand(0, 1280), y: rand(0, 800), v: rand(500, 800) });
-    } else S.rainDrops = [];
+import { clamp, lerp } from "./utils.js";
+
+export class Weather {
+  constructor(world) {
+    this.world = world;
+    this.rainDrops = [];
   }
-  if (S.weather === 'rain') {
-    for (const d of S.rainDrops) {
-      d.y += d.v * dt; d.x += 60 * dt;
-      if (d.y > 820) { d.y = -20; d.x = rand(0, 1280); }
+
+  update(dt) {
+    const w = this.world;
+    // One in-game hour every 20 real seconds.
+    w.timeOfDay = (w.timeOfDay + dt / 20) % 24;
+    // Rain drifts toward its target; storms roll in and out on their own.
+    if (w.rng() < dt * 0.01) {
+      w.weather.targetRain = w.rng() < 0.35 ? 0.3 + w.rng() * 0.6 : 0;
+      w.weather.storm = w.weather.targetRain > 0.7;
     }
+    w.weather.rain = lerp(w.weather.rain, w.weather.targetRain, dt * 0.2);
+    // Keep a pool of rain streaks alive around the camera.
+    if (w.weather.rain > 0.05) {
+      const want = Math.floor(w.weather.rain * 90);
+      while (this.rainDrops.length < want) {
+        this.rainDrops.push({
+          x: w.camera.x + (w.rng() - 0.5) * 1400,
+          y: w.camera.y + (w.rng() - 0.5) * 1000,
+          speed: 700 + w.rng() * 400,
+        });
+      }
+    } else {
+      this.rainDrops.length = 0;
+    }
+    for (const d of this.rainDrops) {
+      d.y += d.speed * dt;
+      d.x -= d.speed * 0.25 * dt;
+      if (d.y > w.camera.y + 550) {
+        d.y = w.camera.y - 550;
+        d.x = w.camera.x + (w.rng() - 0.5) * 1400;
+      }
+    }
+    if (this.rainDrops.length > 120) this.rainDrops.length = 120;
+  }
+
+  isNight() {
+    const h = this.world.timeOfDay;
+    return h < 6 || h >= 19;
+  }
+
+  // 0 = noon brightness, 1 = full night darkness.
+  darkness() {
+    const h = this.world.timeOfDay;
+    if (h >= 7 && h < 17) return 0;
+    if (h >= 17 && h < 19) return (h - 17) / 2 * 0.75;
+    if (h >= 5 && h < 7) return (7 - h) / 2 * 0.75;
+    return 0.75;
+  }
+
+  setNight() {
+    this.world.timeOfDay = 23;
+    this.world.weather.rain = 0.7;
+    this.world.weather.targetRain = 0.7;
+  }
+
+  setDay() {
+    this.world.timeOfDay = 13;
+    this.world.weather.rain = 0;
+    this.world.weather.targetRain = 0;
   }
 }
 
-export function sunFactor() {
-  // 0 = deep night, 1 = full noon sun
-  const h = S.dayTime / 3600;
-  if (h >= 6 && h < 8) return (h - 6) / 2 * 0.8;
-  if (h >= 8 && h < 17) return 1;
-  if (h >= 17 && h < 20) return 1 - (h - 17) / 3 * 0.85;
-  if (h >= 20 || h < 5) return 0.12;
-  return 0.12 + (h - 5) * 0.8; // 5..6 dawn
-}
-
-export function isNight() { return sunFactor() < 0.4; }
-
-export function drawLighting(ctx, w, h) {
-  const sun = sunFactor();
-  if (sun < 0.95) {
-    const dark = (1 - sun) * 0.55;
-    const h = S.dayTime / 3600;
-    const warm = (h >= 17 && h < 20) || (h >= 5 && h < 7);
-    ctx.fillStyle = warm ? `rgba(30,16,60,${dark})` : `rgba(8,14,40,${dark})`;
-    ctx.fillRect(0, 0, w, h);
-  }
-  if (S.weather === 'cloudy') { ctx.fillStyle = 'rgba(60,70,90,0.12)'; ctx.fillRect(0, 0, w, h); }
-  if (S.weather === 'rain') {
-    ctx.strokeStyle = 'rgba(180,200,255,0.35)'; ctx.lineWidth = 1;
-    ctx.beginPath();
-    for (const d of S.rainDrops) { ctx.moveTo(d.x, d.y); ctx.lineTo(d.x - 3, d.y + 14); }
-    ctx.stroke();
-    ctx.fillStyle = 'rgba(40,60,90,0.10)'; ctx.fillRect(0, 0, w, h);
-  }
+export function clamp01(v) {
+  return clamp(v, 0, 1);
 }

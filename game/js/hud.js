@@ -1,146 +1,159 @@
-// Velora Bay — HUD: stars, cash, bars, clock, minimap, speedometer, dialogue, toasts.
-import { S, WORLD } from './state.js';
-import { fmtCash, fmtClock } from './utils.js';
-import { WEAPONS } from './combat.js';
-import { isNight } from './weather.js';
+// hud.js — the heads-up display: wanted stars, health/armor bars, cash,
+// clock, district name, mission objective banner, speedometer, message
+// toasts and the circular minimap (its own small canvas, drawn every frame).
 
-let mmCtx = null;
+import { fmtCash, fmtClock, clamp } from "./utils.js";
+import { districtAt, DISTRICTS } from "./city.js";
+import { WEAPON_DEFS } from "./state.js";
 
-export function initHud() {
-  const mm = document.getElementById('minimap');
-  if (mm) mmCtx = mm.getContext('2d');
-}
+export class Hud {
+  constructor(world, game) {
+    this.world = world;
+    this.game = game;
+    this.root = document.getElementById("hud");
+    this.minimap = document.getElementById("minimap");
+    this.mmCtx = this.minimap ? this.minimap.getContext("2d") : null;
+    this._build();
+  }
 
-export function updateHud() {
-  const starsEl = document.getElementById('stars');
-  if (starsEl) {
-    let html = '';
-    for (let i = 0; i < 5; i++) html += `<span class="${i < S.wanted ? '' : 'off'}">★</span>`;
-    starsEl.innerHTML = html;
+  _build() {
+    if (!this.root) return;
+    this.root.innerHTML = "";
+    const mk = (id, cls, html) => {
+      const el = document.createElement("div");
+      el.id = id;
+      el.className = cls;
+      el.innerHTML = html || "";
+      this.root.appendChild(el);
+      return el;
+    };
+    this.starsEl = mk("hud-stars", "hud-box", "");
+    this.vitalsEl = mk("hud-vitals", "hud-box", "");
+    this.cashEl = mk("hud-cash", "hud-box", "");
+    this.clockEl = mk("hud-clock", "hud-box", "");
+    this.districtEl = mk("hud-district", "hud-box", "");
+    this.bannerEl = mk("hud-banner", "hud-banner", "");
+    this.objectiveEl = mk("hud-objective", "hud-box", "");
+    this.speedEl = mk("hud-speed", "hud-box", "");
+    this.msgEl = mk("hud-message", "hud-box", "");
+    this.hintEl = mk("hud-hint", "hud-box", "");
+    this.weaponEl = mk("hud-weapon", "hud-box", "");
+    // Minimap lives in its own corner box with the canvas inside.
+    const mmBox = document.createElement("div");
+    mmBox.id = "hud-minimap-box";
+    mmBox.className = "hud-box";
+    const canvas = document.createElement("canvas");
+    canvas.id = "minimap";
+    canvas.width = 168;
+    canvas.height = 168;
+    mmBox.appendChild(canvas);
+    this.root.appendChild(mmBox);
+    this.minimap = canvas;
+    this.mmCtx = canvas.getContext("2d");
   }
-  const cash = document.getElementById('cash');
-  if (cash) cash.textContent = fmtCash(S.cash) + (S.respect ? '  •  RESPECT ' + S.respect : '');
-  const hf = document.getElementById('healthfill');
-  if (hf) hf.style.width = Math.max(0, S.player.health) + '%';
-  const af = document.getElementById('armorfill');
-  if (af) af.style.width = Math.max(0, S.player.armor) + '%';
-  const ct = document.getElementById('clocktime');
-  if (ct) ct.textContent = fmtClock(S.dayTime) + (isNight() ? '  🌙' : '  ☀️');
-  const cw = document.getElementById('clockweather');
-  if (cw) cw.textContent = 'VELORA BAY — ' + S.weather.toUpperCase() + (S.mission ? '  •  MISSION ' + (S.missionIndex + 1) + '/10' : '  •  FREE ROAM');
-  const vn = document.getElementById('vehname');
-  const sp = document.getElementById('speed');
-  const wp = document.getElementById('weapon');
-  const p = S.player;
-  if (p && !p.onFoot && p.car) {
-    if (vn) vn.textContent = p.car.def.name + (p.car.health < 40 ? ' — DAMAGED!' : '');
-    if (sp) sp.innerHTML = Math.round(Math.abs(p.car.speed) * 0.36) + ' <small>km/h</small>';
-  } else {
-    if (vn) vn.textContent = 'ON FOOT';
-    if (sp) sp.innerHTML = '';
-  }
-  if (wp) {
-    const w = WEAPONS[S.weapon];
-    const ws = S.weapons[S.weapon];
-    wp.textContent = w.name + (ws && ws.ammo !== undefined && w.mag !== Infinity ? ' • ' + ws.ammo + ' ammo' : ' • ∞');
-  }
-  // toast expiry
-  if (S.toastTimer > 0) {
-    S.toastTimer -= 1 / 60;
-    if (S.toastTimer <= 0) { const t = document.getElementById('toast'); if (t) t.textContent = ''; }
-  }
-  // dialogue
-  const dlg = document.getElementById('dialog');
-  if (dlg) {
-    if (S.dialogQueue.length > 0) {
-      S.dialogTimer -= 1 / 60;
-      const cur = S.dialogQueue[0];
-      dlg.innerHTML = `<b>${cur.who}:</b> ${cur.text}`;
-      dlg.classList.remove('hidden');
-      if (S.dialogTimer <= 0) { S.dialogQueue.shift(); S.dialogTimer = 4.5; }
+
+  update() {
+    const w = this.world;
+    const p = w.player;
+    if (!this.root) return;
+    // Wanted stars: filled gold, empty dim.
+    let stars = "";
+    for (let i = 0; i < 5; i++) stars += i < p.wanted ? "★" : "☆";
+    this.starsEl.textContent = stars;
+    this.starsEl.style.color = p.wanted >= 3 ? "#ff5252" : "#ffd54a";
+    // Health / armor bars.
+    this.vitalsEl.innerHTML =
+      "HEALTH <span class='bar'><span style='width:" + Math.round(p.health) + "%;background:#4caf50'></span></span> " + Math.round(p.health) +
+      "<br>ARMOR <span class='bar'><span style='width:" + Math.round(p.armor) + "%;background:#42a5f5'></span></span> " + Math.round(p.armor);
+    this.cashEl.textContent = fmtCash(p.cash) + "   ◆ " + p.respect + " respect";
+    this.clockEl.textContent = fmtClock(w.timeOfDay) + (w.weather.rain > 0.3 ? "  🌧 rain" : "");
+    const d = districtAt(p.x, p.y);
+    this.districtEl.textContent = d.name + " — " + d.desc;
+    // Objective banner: big, centre-top, fades with its timer.
+    if (w.bannerTimer > 0 && w.banner) {
+      this.bannerEl.style.display = "block";
+      this.bannerEl.textContent = w.banner;
     } else {
-      dlg.classList.add('hidden');
-      dlg.textContent = '';
+      this.bannerEl.style.display = "none";
     }
+    this.objectiveEl.textContent = "▸ " + w.objective;
+    const kmh = Math.round(Math.abs(p.speed || 0) * 0.9);
+    this.speedEl.innerHTML = p.onFoot ? "ON FOOT" : kmh + "<small> km/h</small><br>" + (p.vehicle ? p.vehicle.name : "");
+    if (w.messageTimer > 0 && w.message) {
+      this.msgEl.style.display = "block";
+      this.msgEl.textContent = w.message;
+    } else {
+      this.msgEl.style.display = "none";
+    }
+    const hint = this.game && this.game.shopSystem ? this.game.shopSystem.shopHint() : "";
+    this.hintEl.textContent = hint;
+    this.hintEl.style.display = hint ? "block" : "none";
+    const def = WEAPON_DEFS[p.weapon];
+    this.weaponEl.textContent = def.name + "  •  " + (p.ammo[p.weapon] || 0) + " ammo  •  [1-4] switch  •  [Q] fire";
+    this.drawMinimap();
   }
-  // contextual hint
-  const hint = document.getElementById('hint');
-  if (hint) {
-    const sh = window.__veloraNearestShop && window.__veloraNearestShop();
-    if (S.taxi) hint.textContent = S.taxi.state === 'toPickup' ? 'TAXI: reach the green marker to pick up' : 'TAXI: drop the passenger at the green marker';
-    else if (sh) hint.textContent = 'Press G — ' + sh.name;
-    else if (p && p.onFoot) hint.textContent = 'E — steal / enter car • H — taxi job (in a taxi) • G — shop • C — payphone bribe';
-    else hint.textContent = 'WASD drive • SHIFT handbrake • E exit car • Q horn • H taxi job';
-  }
-  drawMinimap();
-}
 
-export function drawMinimap() {
-  if (!mmCtx || !S.city) return;
-  const ctx = mmCtx, W = 200, H = 200;
-  const scale = W / (WORLD.size + 200);
-  ctx.clearRect(0, 0, W, H);
-  ctx.fillStyle = '#0e2418';
-  ctx.fillRect(0, 0, W, H);
-  // water / beach on north edge
-  ctx.fillStyle = '#2e7f9e';
-  ctx.fillRect(0, 0, W, 12);
-  ctx.fillStyle = '#c9a86a';
-  ctx.fillRect(0, 12, W, 6);
-  // roads
-  ctx.strokeStyle = '#3d4a3d'; ctx.lineWidth = 3;
-  const b = WORLD.block;
-  for (let i = 0; i < WORLD.roads; i++) {
-    ctx.beginPath(); ctx.moveTo((i * b + 100) * scale, 0); ctx.lineTo((i * b + 100) * scale, H); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(0, (i * b + 100) * scale); ctx.lineTo(W, (i * b + 100) * scale); ctx.stroke();
-  }
-  // buildings
-  ctx.fillStyle = 'rgba(120,130,150,0.8)';
-  for (const bd of S.city.buildings) {
-    ctx.fillRect((bd.x + 100) * scale, (bd.y + 100) * scale, Math.max(1, bd.w * scale), Math.max(1, bd.h * scale));
-  }
-  // shops
-  ctx.fillStyle = '#7dff8a';
-  for (const sh of S.city.shops) { ctx.fillRect((sh.x + 100) * scale - 2, (sh.y + 100) * scale - 2, 4, 4); }
-  // packages
-  ctx.fillStyle = '#ffd23f';
-  for (const pkg of S.city.packages) if (!pkg.found) ctx.fillRect((pkg.x + 100) * scale - 1.5, (pkg.y + 100) * scale - 1.5, 3, 3);
-  const dot = (x, y, color, r) => {
-    ctx.fillStyle = color;
-    ctx.beginPath(); ctx.arc((x + 100) * scale, (y + 100) * scale, r, 0, 7); ctx.fill();
-    ctx.strokeStyle = '#000'; ctx.lineWidth = 1; ctx.stroke();
-  };
-  // taxi marker
-  if (S.taxi) {
-    const t = S.taxi.state === 'toPickup' ? S.taxi.pickup : S.taxi.drop;
-    dot(t.x, t.y, '#7dff8a', 5);
-  }
-  // race checkpoint
-  if (S.race && !S.race.won) dot(S.race.cps[S.race.next].x, S.race.cps[S.race.next].y, '#7dff8a', 5);
-  // mission marker
-  if (S.mission) {
-    const st = S.mission.def.stages[S.mission.stage];
-    if (st && st.at) dot(st.at.x, st.at.y, '#ffd23f', 5);
-    else if (st && st.type === 'race' && S.race) dot(S.race.cps[S.race.next].x, S.race.cps[S.race.next].y, '#ffd23f', 5);
-  }
-  // vigilante target
-  if (S.vigilanteTarget) dot(S.vigilanteTarget.x, S.vigilanteTarget.y, '#ff5b4d', 4);
-  // cops
-  for (const c of S.cops) dot(c.x, c.y, '#ff2d2d', 3);
-  // player
-  const p = S.player;
-  if (p) {
-    ctx.fillStyle = '#fff';
-    ctx.beginPath(); ctx.arc((p.x + 100) * scale, (p.y + 100) * scale, 4, 0, 7); ctx.fill();
-    ctx.strokeStyle = '#000'; ctx.lineWidth = 1.5; ctx.stroke();
-    // view cone
-    ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+  drawMinimap() {
+    const ctx = this.mmCtx;
+    if (!ctx) return;
+    const w = this.world;
+    const p = w.player;
+    const S = 168;
+    const scale = S / 3200;
+    ctx.clearRect(0, 0, S, S);
+    ctx.fillStyle = "#20241f";
+    ctx.fillRect(0, 0, S, S);
+    // District blocks.
+    for (const d of DISTRICTS) {
+      ctx.fillStyle = d.ground;
+      ctx.fillRect(d.x * scale, d.y * scale, d.w * scale, d.h * scale);
+    }
+    // Roads.
+    ctx.strokeStyle = "#3a3a3a";
+    ctx.lineWidth = 3;
+    for (let i = 0; i <= 8; i++) {
+      ctx.beginPath(); ctx.moveTo(i * 400 * scale, 0); ctx.lineTo(i * 400 * scale, S); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, i * 400 * scale); ctx.lineTo(S, i * 400 * scale); ctx.stroke();
+    }
+    const dot = (x, y, color, r) => {
+      ctx.fillStyle = color;
+      ctx.beginPath(); ctx.arc(x * scale, y * scale, r, 0, Math.PI * 2); ctx.fill();
+    };
+    for (const pk of w.packages) if (!pk.taken) dot(pk.x, pk.y, "#ffd54a", 2);
+    for (const s of w.shops) dot(s.x, s.y, "#4caf50", 3);
+    const marker = this._currentMarker();
+    if (marker) {
+      const pulse = 4 + Math.sin(w.time * 5) * 2;
+      dot(marker.x, marker.y, "#ff5252", pulse);
+    }
+    for (const cop of w.police) dot(cop.x, cop.y, "#3d7bff", 3);
+    if (w.heli) dot(w.heli.x, w.heli.y, "#9fd8ff", 3);
+    // Player: white triangle pointing along the heading.
+    ctx.save();
+    ctx.translate(p.x * scale, p.y * scale);
+    ctx.rotate(p.angle);
+    ctx.fillStyle = "#ffffff";
     ctx.beginPath();
-    ctx.moveTo((p.x + 100) * scale, (p.y + 100) * scale);
-    ctx.lineTo((p.x + 100) * scale + Math.cos(p.angle) * 12, (p.y + 100) * scale + Math.sin(p.angle) * 12);
-    ctx.stroke();
+    ctx.moveTo(7, 0); ctx.lineTo(-5, -4.5); ctx.lineTo(-5, 4.5); ctx.closePath(); ctx.fill();
+    ctx.restore();
+    // View frame.
+    ctx.strokeStyle = "rgba(255,255,255,0.5)";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(0.5, 0.5, S - 1, S - 1);
   }
-  // north indicator
-  ctx.fillStyle = '#fff'; ctx.font = 'bold 11px sans-serif'; ctx.textAlign = 'left';
-  ctx.fillText('N', 5, 13);
+
+  _currentMarker() {
+    const w = this.world;
+    if (this.game && this.game.missionSystem) {
+      const m = this.game.missionSystem.marker();
+      if (m) return m;
+    }
+    if (this.game && this.game.side) {
+      const t = this.game.side.taxiMarker();
+      if (t) return t;
+      const r = this.game.side.raceMarker();
+      if (r) return r;
+    }
+    return null;
+  }
 }

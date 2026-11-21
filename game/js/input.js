@@ -1,55 +1,59 @@
-// Velora Bay — keyboard and mouse input.
-import { S } from './state.js';
+// input.js — keyboard + mouse state, kept as one small class so the game
+// loop, the self-test harness and the shot stager can all drive it the same
+// way (real keys in play, injected keys in tests).
 
-export function setupInput(canvas) {
-  const down = (e) => {
-    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' ', 'Tab'].includes(e.key)) e.preventDefault();
-    S.keys[e.key.toLowerCase()] = true;
-    if (e.key === 'Escape' || e.key.toLowerCase() === 'p') togglePause();
-    if (e.key.toLowerCase() === 'm') window.__veloraToggleMusic && window.__veloraToggleMusic();
-  };
-  const up = (e) => { S.keys[e.key.toLowerCase()] = false; };
-  window.addEventListener('keydown', down);
-  window.addEventListener('keyup', up);
-  window.addEventListener('blur', () => { S.keys = {}; });
-  canvas.addEventListener('mousemove', (e) => {
-    const r = canvas.getBoundingClientRect();
-    S.mouse.x = (e.clientX - r.left) * (canvas.width / r.width);
-    S.mouse.y = (e.clientY - r.top) * (canvas.height / r.height);
-  });
-  canvas.addEventListener('mousedown', (e) => { if (e.button === 0) S.mouse.down = true; });
-  window.addEventListener('mouseup', () => { S.mouse.down = false; });
-  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
-}
+export class Input {
+  constructor() {
+    this.keys = new Set();
+    this.pressed = new Set(); // edge-triggered, cleared each frame
+    this.mouse = { x: 0, y: 0, down: false };
+    this._onKeyDown = (e) => {
+      if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", " "].includes(e.key)) e.preventDefault();
+      if (!this.keys.has(e.key)) this.pressed.add(e.key);
+      this.keys.add(e.key.length === 1 ? e.key.toLowerCase() : e.key);
+    };
+    this._onKeyUp = (e) => {
+      this.keys.delete(e.key.length === 1 ? e.key.toLowerCase() : e.key);
+    };
+    this._onMouseMove = (e) => { this.mouse.x = e.clientX; this.mouse.y = e.clientY; };
+    this._onMouseDown = () => { this.mouse.down = true; };
+    this._onMouseUp = () => { this.mouse.down = false; };
+  }
 
-export function togglePause() {
-  if (S.mode === 'play') { S.mode = 'pause'; window.__veloraShowPause && window.__veloraShowPause(); }
-  else if (S.mode === 'pause') { S.mode = 'play'; window.__veloraHidePause && window.__veloraHidePause(); }
-}
+  attach(target) {
+    target.addEventListener("keydown", this._onKeyDown);
+    target.addEventListener("keyup", this._onKeyUp);
+    target.addEventListener("mousemove", this._onMouseMove);
+    target.addEventListener("mousedown", this._onMouseDown);
+    target.addEventListener("mouseup", this._onMouseUp);
+  }
 
-export function key(name) { return !!S.keys[name]; }
-export function pressedOnce(name) {
-  if (S.keys[name] && !S.keys['__p_' + name]) { S.keys['__p_' + name] = true; return true; }
-  if (!S.keys[name]) S.keys['__p_' + name] = false;
-  return false;
-}
-export function driveInput() {
-  return {
-    up: key('w') || key('arrowup'),
-    down: key('s') || key('arrowdown'),
-    left: key('a') || key('arrowleft'),
-    right: key('d') || key('arrowright'),
-    handbrake: key('shift'),
-    jump: key(' '),
-  };
-}
-export function walkInput() {
-  return {
-    up: key('w') || key('arrowup'),
-    down: key('s') || key('arrowdown'),
-    left: key('a') || key('arrowleft'),
-    right: key('d') || key('arrowright'),
-    sprint: key('shift'),
-    jump: key(' '),
-  };
+  // WASD + arrows, normalised to one set of names.
+  isDown(...names) {
+    for (const n of names) if (this.keys.has(n)) return true;
+    return false;
+  }
+
+  get up() { return this.isDown("w", "ArrowUp"); }
+  get down() { return this.isDown("s", "ArrowDown"); }
+  get left() { return this.isDown("a", "ArrowLeft"); }
+  get right() { return this.isDown("d", "ArrowRight"); }
+  get sprint() { return this.isDown("Shift"); }
+  get brake() { return this.isDown(" "); }
+
+  // True once, on the frame the key went down.
+  wasPressed(name) {
+    const k = name.length === 1 ? name.toLowerCase() : name;
+    return this.pressed.has(k) || this.pressed.has(name);
+  }
+
+  injectKey(name, down) {
+    const k = name.length === 1 ? name.toLowerCase() : name;
+    if (down) { if (!this.keys.has(k)) this.pressed.add(k); this.keys.add(k); }
+    else this.keys.delete(k);
+  }
+
+  endFrame() {
+    this.pressed.clear();
+  }
 }

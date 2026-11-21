@@ -1,110 +1,148 @@
-// Velora Bay — menus: start, pause, mission complete, wasted/busted, mission list.
-import { S, addCash, showToast } from './state.js';
-import { MISSIONS, retryMission } from './missions.js';
-import { saveGame, loadGame, hasSave } from './save.js';
-import { initAudio, resumeAudio, startMusic } from './audio.js';
+// menus.js — start screen, pause, mission-passed card, shop browser and the
+// busted / wasted screens. All DOM overlays on top of the canvas; the game
+// loop pauses while a menu that blocks play is open.
 
-export function initMenus() {
-  const startBtn = document.getElementById('startbtn');
-  if (startBtn) startBtn.addEventListener('click', () => startGame());
-  const resumeBtn = document.getElementById('resumebtn');
-  if (resumeBtn) resumeBtn.addEventListener('click', () => { S.mode = 'play'; hidePause(); });
-  const saveBtn = document.getElementById('savebtn');
-  if (saveBtn) saveBtn.addEventListener('click', () => { saveGame(); showToast('Game saved!', 2); });
-  const md = document.getElementById('mddismiss');
-  if (md) md.addEventListener('click', () => { document.getElementById('missiondone').classList.add('hidden'); });
-  const go = document.getElementById('gorespawn');
-  if (go) go.addEventListener('click', () => respawn());
-  const ch = document.getElementById('continuehint');
-  if (ch && hasSave()) ch.textContent = 'A saved game was found — press START to continue it.';
-  window.__veloraShowPause = showPause;
-  window.__veloraHidePause = hidePause;
-  window.__veloraWasted = wasted;
-  window.__veloraBusted = busted;
-  window.__veloraMissionPassed = missionPassed;
-  window.__veloraMissionFailed = () => {};
-  window.__veloraToast = (t) => showToast(t, 3);
-}
+import { STORY_INTRO, OUTRO, CHARACTERS } from "./story.js";
+import { fmtCash } from "./utils.js";
+import { SHOP_MENU } from "./shops.js";
+import { hasSave, saveSummary } from "./save.js";
 
-export function startGame() {
-  initAudio(); resumeAudio(); startMusic();
-  const loaded = loadGame();
-  document.getElementById('startmenu').classList.add('hidden');
-  S.mode = 'play';
-  if (loaded) showToast('Welcome back to Velora Bay, Rex.', 3);
-  else showToast('Welcome to Velora Bay — follow the yellow marker!', 4);
-}
-
-export function showPause() {
-  const el = document.getElementById('pausemenu');
-  if (!el) return;
-  el.classList.remove('hidden');
-  const st = document.getElementById('pausestats');
-  if (st) st.textContent = `Cash ${Math.round(S.cash)} • Respect ${S.respect} • Missions ${S.stats.missionsDone}/10 • Packages ${S.stats.packages}/15 • Kills ${S.stats.kills} • Fares ${S.stats.fares}`;
-  const pm = document.getElementById('pausemission');
-  if (pm) {
-    const def = MISSIONS[S.missionIndex];
-    pm.innerHTML = def ? `<b>Current mission:</b> ${def.title} — ${def.brief}<br><b>All missions:</b> ` + MISSIONS.map((m, i) => (S.missionDone[m.id] ? '✓ ' : i === S.missionIndex ? '▶ ' : '· ') + m.title).join('<br>') : 'Free roam — all missions done!';
+export class Menus {
+  constructor(world, game) {
+    this.world = world;
+    this.game = game;
+    this.shopEl = null;
+    this.overlayEl = document.getElementById("menu-overlay");
+    this._buildStartScreen();
   }
-}
 
-export function hidePause() {
-  const el = document.getElementById('pausemenu');
-  if (el) el.classList.add('hidden');
-}
+  _buildStartScreen() {
+    const ov = this.overlayEl;
+    if (!ov) return;
+    ov.innerHTML = "";
+    const box = document.createElement("div");
+    box.className = "menu-card";
+    box.id = "start-card";
+    const save = hasSave() ? saveSummary() : null;
+    box.innerHTML =
+      "<h1>VELORA BAY</h1>" +
+      "<p class='tagline'>An open-world crime story — sun, speed and the Kane Syndicate.</p>" +
+      "<p class='story'>" + STORY_INTRO.join("<br>") + "</p>" +
+      "<p class='chars'>Rex Delgado &nbsp;•&nbsp; Mama Luz &nbsp;•&nbsp; Dante Cole &nbsp;•&nbsp; Marcus Kane</p>" +
+      "<div class='menu-buttons'>" +
+      "<button id='btn-start'>▶ START ENGINE</button>" +
+      (save ? "<button id='btn-continue'>↻ CONTINUE — " + fmtCash(save.cash) + ", " + save.missions + " missions done</button>" : "") +
+      "</div>" +
+      "<p class='controls'>WASD / arrows — drive &amp; walk &nbsp;•&nbsp; E — enter car / shop &nbsp;•&nbsp; Q or click — shoot &nbsp;•&nbsp; 1-4 — weapons<br>" +
+      "M — next mission &nbsp;•&nbsp; T — taxi fare &nbsp;•&nbsp; R — street race &nbsp;•&nbsp; V — vigilante &nbsp;•&nbsp; F5 — save &nbsp;•&nbsp; P / Esc — pause</p>" +
+      "<p class='fine'>10 story missions • 10 cars • 6 shops • 15 hidden packages • 3 races • wanted 0–5 stars • day &amp; night • rain</p>";
+    ov.appendChild(box);
+    const startBtn = document.getElementById("btn-start");
+    if (startBtn) startBtn.addEventListener("click", () => this.game.startGame(false));
+    const contBtn = document.getElementById("btn-continue");
+    if (contBtn) contBtn.addEventListener("click", () => this.game.startGame(true));
+    ov.style.display = "flex";
+  }
 
-export function missionPassed(def) {
-  const el = document.getElementById('missiondone');
-  if (!el) return;
-  document.getElementById('mdtitle').textContent = 'MISSION PASSED';
-  document.getElementById('mdsub').textContent = def.title + ' — ' + def.giver;
-  document.getElementById('mdreward').textContent = `Reward: $${def.reward}. Respect +10. Next mission: ${(MISSIONS[S.missionIndex] || {}).title || 'free roam'}.`;
-  el.classList.remove('hidden');
-  setTimeout(() => el.classList.add('hidden'), 5000);
-  saveGame();
-}
+  hideStartScreen() {
+    if (this.overlayEl) this.overlayEl.style.display = "none";
+  }
 
-export function wasted(from) {
-  S.mode = 'dead';
-  const el = document.getElementById('gameover');
-  document.getElementById('gotitle').textContent = 'WASTED';
-  document.getElementById('gosub').textContent = 'Rex got taken down' + (from ? ' by ' + from : '') + '. The city keeps moving without you... for now.';
-  el.classList.remove('hidden');
-}
+  showPause() {
+    const ov = this.overlayEl;
+    if (!ov) return;
+    ov.innerHTML = "";
+    const box = document.createElement("div");
+    box.className = "menu-card";
+    const p = this.world.player;
+    box.innerHTML =
+      "<h1>PAUSED</h1>" +
+      "<p>Cash " + fmtCash(p.cash) + " &nbsp;•&nbsp; Missions done " + this.world.missions.completed.length + "/10" +
+      " &nbsp;•&nbsp; Packages " + this.world.stats.packagesFound + "/15 &nbsp;•&nbsp; Fares " + this.world.stats.faresDone + "</p>" +
+      "<div class='menu-buttons'><button id='btn-resume'>▶ RESUME</button>" +
+      "<button id='btn-save'>💾 SAVE GAME</button>" +
+      "<button id='btn-restart'>↺ RESTART DAY</button></div>" +
+      "<p class='controls'>WASD drive • E enter car • Q shoot • M mission • T taxi • R race • V vigilante</p>";
+    ov.appendChild(box);
+    ov.style.display = "flex";
+    document.getElementById("btn-resume").addEventListener("click", () => this.game.togglePause(false));
+    document.getElementById("btn-save").addEventListener("click", () => {
+      this.game.saveNow();
+      document.getElementById("btn-save").textContent = "✓ SAVED";
+    });
+    document.getElementById("btn-restart").addEventListener("click", () => window.location.reload());
+  }
 
-export function busted() {
-  S.mode = 'dead';
-  const lost = Math.min(S.cash, 200);
-  addCash(-lost);
-  S.wantedHeat = 0; S.wanted = 0;
-  S.cops.forEach(c => { c.givingUp = true; });
-  const el = document.getElementById('gameover');
-  document.getElementById('gotitle').textContent = 'BUSTED';
-  document.getElementById('gosub').textContent = `The V.B.P.D. hauled Rex in. Bail: $${lost}. The cops let him go — this time.`;
-  el.classList.remove('hidden');
-}
+  hidePause() {
+    if (this.overlayEl) this.overlayEl.style.display = "none";
+  }
 
-export function respawn() {
-  const el = document.getElementById('gameover');
-  el.classList.add('hidden');
-  const p = S.player;
-  const hosp = S.city.landmarks.find(l => l.id === 'hospital');
-  p.x = hosp.x + 40; p.y = hosp.y + 40;
-  p.health = 100; p.armor = 0; p.dead = false; p.invuln = 2;
-  if (p.car) { p.car.driver = null; p.car = null; }
-  p.onFoot = true;
-  S.camera.x = p.x; S.camera.y = p.y;
-  S.mode = 'play';
-  showToast('St. Maria Hospital — patched up and back on the streets.', 3);
-  saveGame();
-}
+  showMissionPassed(def) {
+    const ov = this.overlayEl;
+    if (!ov) return;
+    ov.innerHTML = "";
+    const box = document.createElement("div");
+    box.className = "menu-card small";
+    const next = this.world.missions.completed.length >= 10;
+    box.innerHTML =
+      "<h1 class='gold'>MISSION PASSED</h1>" +
+      "<h2>" + def.title + "</h2>" +
+      "<p>Reward: <b>" + fmtCash(def.reward) + "</b> &nbsp;•&nbsp; Respect +10</p>" +
+      (next ? "<p class='story'>" + OUTRO.join("<br>") + "</p>" : "<p>Press M whenever you're ready for the next job.</p>") +
+      "<div class='menu-buttons'><button id='btn-continue-play'>▶ KEEP DRIVING</button></div>";
+    ov.appendChild(box);
+    ov.style.display = "flex";
+    document.getElementById("btn-continue-play").addEventListener("click", () => this.hidePause());
+  }
 
-export function showMissionList() {
-  const lines = MISSIONS.map((m, i) => `${S.missionDone[m.id] ? '✓' : i === S.missionIndex ? '▶' : '·'} ${i + 1}. ${m.title} — ${m.giver} ($${m.reward})`).join('\n');
-  showToast('MISSIONS:\n' + lines, 6);
-  const def = MISSIONS[S.missionIndex];
-  if (def && !S.mission && !S.missionDone[def.id]) {
-    // retry a failed mission
-    retryMission();
+  showGameOver(kind) {
+    const ov = this.overlayEl;
+    if (!ov) return;
+    ov.innerHTML = "";
+    const box = document.createElement("div");
+    box.className = "menu-card";
+    if (kind === "busted") {
+      box.innerHTML = "<h1>BUSTED!</h1><p>The VCPD hauled you in. They kept $200 and your car.</p>" +
+        "<p>You'll wake up at St. Maria Hospital — and the city will still be there.</p>";
+    } else {
+      box.innerHTML = "<h1>WASTED</h1><p>Rex went down in a hail of gunfire on the streets of Velora Bay.</p>" +
+        "<p>The paramedics at St. Maria Hospital put him back together. The Syndicate is still out there.</p>";
+    }
+    box.innerHTML += "<div class='menu-buttons'><button id='btn-hospital'>🏥 WAKE UP AT ST. MARIA HOSPITAL</button></div>";
+    ov.appendChild(box);
+    ov.style.display = "flex";
+    document.getElementById("btn-hospital").addEventListener("click", () => {
+      this.game.respawn();
+      this.hidePause();
+    });
+  }
+
+  showShop(shop) {
+    this.hideShop();
+    const root = document.getElementById("shop-panel");
+    if (!root) return;
+    const items = SHOP_MENU[shop.kind] || [];
+    let html = "<h2>" + shop.name + "</h2><p class='fine'>Your cash: " + fmtCash(this.world.player.cash) + " — click to buy, E or Esc to leave.</p>";
+    items.forEach((it, i) => {
+      html += "<button class='shop-item' data-i='" + i + "'>" + it.label + " — <b>" + fmtCash(it.price) + "</b></button>";
+    });
+    html += "<p id='shop-msg' class='fine'></p>";
+    root.innerHTML = html;
+    root.style.display = "block";
+    root.querySelectorAll(".shop-item").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const msg = this.game.shopSystem.buy(parseInt(btn.dataset.i, 10));
+        const mEl = document.getElementById("shop-msg");
+        if (mEl) mEl.textContent = msg;
+        this.showShop(shop); // refresh cash + list
+        const m2 = document.getElementById("shop-msg");
+        if (m2) m2.textContent = msg;
+      });
+    });
+  }
+
+  hideShop() {
+    const root = document.getElementById("shop-panel");
+    if (root) { root.style.display = "none"; root.innerHTML = ""; }
   }
 }
