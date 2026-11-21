@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Velora Bay — Open World Crime</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #0b1220; font-family: "Segoe UI", Verdana, sans-serif; }
+  #wrap { position: fixed; inset: 0; }
+  #game { display: block; width: 100vw; height: 100vh; background: #1c2b1a; }
+  .hud { position: absolute; color: #fff; text-shadow: 0 2px 4px rgba(0,0,0,.8); pointer-events: none; user-select: none; z-index: 5; }
+  #topleft { top: 14px; left: 16px; }
+  #stars { font-size: 26px; letter-spacing: 3px; color: #ffd23f; }
+  #stars .off { color: rgba(255,255,255,.25); }
+  #cash { font-size: 24px; font-weight: 800; color: #7dff8a; margin-top: 2px; }
+  #bars { margin-top: 6px; width: 210px; }
+  .bar { height: 12px; background: rgba(0,0,0,.55); border: 1px solid rgba(255,255,255,.5); margin-top: 4px; }
+  .bar > div { height: 100%; }
+  #healthfill { background: linear-gradient(90deg,#ff5b4d,#ff8a5c); width: 100%; }
+  #armorfill { background: linear-gradient(90deg,#4db8ff,#8ad8ff); width: 0%; }
+  .barlabel { font-size: 10px; letter-spacing: 2px; opacity: .85; }
+  #missionbanner { top: 12px; left: 50%; transform: translateX(-50%); text-align: center; width: 640px; }
+  #missiontitle { font-size: 15px; font-weight: 800; letter-spacing: 3px; color: #ffd23f; text-transform: uppercase; }
+  #missionobj { font-size: 17px; font-weight: 700; margin-top: 2px; }
+  #missionsub { font-size: 12px; opacity: .9; margin-top: 2px; }
+  #clock { top: 14px; right: 16px; text-align: right; font-size: 15px; font-weight: 700; }
+  #clock .w { color: #9fd8ff; font-size: 12px; }
+  #minimapwrap { left: 16px; bottom: 16px; border: 2px solid rgba(255,255,255,.65); border-radius: 4px; overflow: hidden; box-shadow: 0 2px 10px rgba(0,0,0,.6); }
+  #minimap { display: block; background: #0e1a12; }
+  #speedo { right: 18px; bottom: 16px; text-align: right; }
+  #speed { font-size: 34px; font-weight: 900; }
+  #speed small { font-size: 13px; font-weight: 600; opacity: .8; }
+  #vehname { font-size: 13px; font-weight: 700; color: #ffd23f; }
+  #weapon { font-size: 13px; margin-top: 2px; }
+  #toast { left: 50%; bottom: 110px; transform: translateX(-50%); font-size: 18px; font-weight: 800; color: #ffe98a; text-align: center; }
+  #hint { left: 50%; bottom: 22px; transform: translateX(-50%); font-size: 13px; opacity: .85; text-align: center; }
+  .overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; flex-direction: column; background: rgba(5,10,25,.72); color: #fff; z-index: 10; text-align: center; padding: 20px; }
+  .overlay h1 { font-size: 64px; letter-spacing: 6px; color: #ffd23f; text-shadow: 0 4px 0 #b3541e, 0 8px 24px rgba(0,0,0,.8); }
+  .overlay h2 { font-size: 20px; letter-spacing: 4px; color: #7dff8a; margin-top: 4px; }
+  .overlay p { max-width: 640px; font-size: 15px; line-height: 1.55; margin-top: 14px; opacity: .95; }
+  .overlay .keys { font-size: 13px; line-height: 1.9; margin-top: 14px; background: rgba(0,0,0,.45); padding: 10px 22px; border-radius: 8px; }
+  .overlay button { pointer-events: auto; margin-top: 22px; font-size: 18px; font-weight: 800; letter-spacing: 2px; padding: 13px 42px; border: none; border-radius: 8px; background: #ffd23f; color: #221100; cursor: pointer; box-shadow: 0 4px 0 #b3541e; }
+  .overlay button:hover { background: #ffe27a; }
+  .hidden { display: none !important; }
+  #dialog { left: 50%; bottom: 150px; transform: translateX(-50%); width: 680px; background: rgba(0,0,0,.68); border-left: 4px solid #ffd23f; padding: 10px 16px; font-size: 15px; line-height: 1.45; }
+  #dialog b { color: #ffd23f; }
+  #testlog { position: absolute; left: 0; top: 0; z-index: 99; color: #0f0; background: #000; font-size: 10px; white-space: pre; pointer-events: none; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="1280" height="800"></canvas>
+  <div class="hud" id="topleft">
+    <div id="stars"></div>
+    <div id="cash">$250</div>
+    <div id="bars">
+      <div class="barlabel">HEALTH</div><div class="bar"><div id="healthfill"></div></div>
+      <div class="barlabel">ARMOR</div><div class="bar"><div id="armorfill"></div></div>
+    </div>
+  </div>
+  <div class="hud" id="missionbanner">
+    <div id="missiontitle"></div>
+    <div id="missionobj"></div>
+    <div id="missionsub"></div>
+  </div>
+  <div class="hud" id="clock"><div id="clocktime">08:00</div><div class="w" id="clockweather">VELORA BAY — CLEAR</div></div>
+  <div class="hud" id="minimapwrap"><canvas id="minimap" width="200" height="200"></canvas></div>
+  <div class="hud" id="speedo"><div id="vehname"></div><div id="speed"></div><div id="weapon"></div></div>
+  <div class="hud" id="toast"></div>
+  <div class="hud" id="dialog" class="hidden"></div>
+  <div class="hud" id="hint"></div>
+  <div id="testlog"></div>
+
+  <div class="overlay" id="startmenu">
+    <h1>VELORA BAY</h1>
+    <h2>AN OPEN-WORLD CRIME STORY</h2>
+    <p>Rex Delgado came home to Velora Bay with nothing but a busted sedan and a debt to Mama Luz.
+    The Kane Syndicate owns the harbor, the Strip and half the cops. Take the city back —
+    one job, one car, one street at a time.</p>
+    <div class="keys">
+      WASD / Arrows — walk &amp; drive &nbsp;•&nbsp; E — enter / exit car &nbsp;•&nbsp; Mouse — aim, Click — shoot<br>
+      SHIFT — sprint / handbrake &nbsp;•&nbsp; SPACE — jump &nbsp;•&nbsp; 1/2/3 — weapons &nbsp;•&nbsp; M — music &nbsp;•&nbsp; P / ESC — pause<br>
+      H — taxi job &nbsp;•&nbsp; G — garage &nbsp;•&nbsp; C — phone (clear wanted, $) &nbsp;•&nbsp; TAB — missions
+    </div>
+    <button id="startbtn">START ENGINE</button>
+    <p id="continuehint" style="font-size:13px;color:#9fd8ff"></p>
+  </div>
+
+  <div class="overlay hidden" id="pausemenu">
+    <h1 style="font-size:44px">PAUSED</h1>
+    <p id="pausestats"></p>
+    <div class="keys" id="pausemission"></div>
+    <button id="resumebtn">RESUME</button>
+    <button id="savebtn" style="background:#7dff8a;box-shadow:0 4px 0 #2a7a3a">SAVE GAME</button>
+  </div>
+
+  <div class="overlay hidden" id="missiondone">
+    <h1 style="font-size:40px" id="mdtitle">MISSION PASSED</h1>
+    <h2 id="mdsub"></h2>
+    <p id="mdreward"></p>
+    <button id="mddismiss">CONTINUE</button>
+  </div>
+
+  <div class="overlay hidden" id="gameover">
+    <h1 style="font-size:44px" id="gotitle">WASTED</h1>
+    <p id="gosub"></p>
+    <button id="gorespawn">GET UP — ST. MARIA HOSPITAL</button>
+  </div>
+</div>
+<script type="module" src="./js/main.js"></script>
+</body>
+</html>
